@@ -29,11 +29,12 @@ class LiteRAGAgent(BaseAgent):
     def _handle_answer_query(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
         """Handle answer_query messages."""
         query = message.get("data", {}).get("query")
+        context_entities = message.get("data", {}).get("context_entities")
         
         if not query:
             return {"status": "error", "error": "Query is required"}
         
-        answer, context, subgraph = self.answer_query(query)
+        answer, context, subgraph = self.answer_query(query, context_entities=context_entities)
         
         return {
             "status": "success", 
@@ -59,7 +60,7 @@ class LiteRAGAgent(BaseAgent):
             "subgraph": subgraph
         }
     
-    def answer_query(self, query: str) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+    def answer_query(self, query: str, context_entities: List[str] = None) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Answer a query using the knowledge graph."""
         print(f"Answering query: {query}")
         
@@ -70,7 +71,7 @@ class LiteRAGAgent(BaseAgent):
             return "I don't have enough information to answer this query.", [], subgraph
         
         # Extract context from subgraph
-        context = self._extract_context_from_subgraph(subgraph)
+        context = self._extract_context_from_subgraph(subgraph, context_entities)
         
         if not context:
             return "I don't have enough information to answer this query.", [], subgraph
@@ -213,7 +214,7 @@ class LiteRAGAgent(BaseAgent):
             print(f"Error extracting entities from query: {e}")
             return {}
     
-    def _extract_context_from_subgraph(self, subgraph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_context_from_subgraph(self, subgraph: Dict[str, Any], context_entities: List[str] = None) -> List[Dict[str, Any]]:
         """Extract context from the subgraph."""
         context = []
         
@@ -243,6 +244,9 @@ class LiteRAGAgent(BaseAgent):
         # Extract entity information
         for node in entity_nodes:
             entity_type = node["node_type"][0] if node["node_type"] else "Unknown"
+            
+            if context_entities and node["name"] not in context_entities:
+                continue
             
             context.append({
                 "type": "entity",
@@ -360,10 +364,10 @@ class LiteRAGAgent(BaseAgent):
         
         return "\n".join(formatted_context)
     
-    def run(self, query: str):
+    def run(self, query: str, context_entities: List[str] = None):
         """Run the query answering process."""
         print(f"Processing query: {query}")
-        answer, context, subgraph = self.answer_query(query)
+        answer, context, subgraph = self.answer_query(query, context_entities=context_entities)
         
         print("Query processing completed:")
         print(f"- Subgraph size: {len(subgraph['nodes'])} nodes, {len(subgraph['relationships'])} relationships")

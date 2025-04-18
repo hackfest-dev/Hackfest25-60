@@ -91,7 +91,7 @@ class GroqClient(LLMClient):
     """Client for Groq AI API."""
     
     def __init__(self, model_name: str = None):
-        self.model_name = model_name or os.getenv("GROQ_MODEL", "meta-llama/llama-4-maverick-17b-128e-instruct")
+        self.model_name = model_name or os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = groq.Client(api_key=self.api_key)
         # We'll use Nomic embeddings since Groq doesn't provide embeddings

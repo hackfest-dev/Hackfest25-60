@@ -64,7 +64,7 @@ class WriterAgent(BaseAgent):
             "latex_code": latex_code
         }
     
-    def generate_report(self, title: str, queries: List[str], answers: List[str], 
+    def generate_report(self, title: str, queries: List[str], answers: List[Any], 
                        output_path: str = "report.pdf") -> str:
         """Generate a LaTeX report based on queries and answers."""
         print(f"Generating report: {title}")
@@ -84,37 +84,53 @@ class WriterAgent(BaseAgent):
         return report_path
     
     def _generate_report_structure(self, title: str, queries: List[str], 
-                                 answers: List[str]) -> Dict[str, Any]:
+                                 answers: List[Any]) -> Dict[str, Any]:
         """Generate the structure of the report."""
         # Combine queries and answers
         qa_pairs = []
         for i in range(min(len(queries), len(answers))):
-            qa_pairs.append({
-                "query": queries[i],
-                "answer": answers[i]
-            })
+            # Check if answer is already a dictionary with query and answer
+            if isinstance(answers[i], dict) and "query" in answers[i] and "answer" in answers[i]:
+                qa_pairs.append(answers[i])
+            else:
+                qa_pairs.append({
+                    "query": queries[i],
+                    "answer": answers[i]
+                })
         
         prompt = f"""
-        Generate a structure for a research report based on the following queries and answers.
-        The report should have the following sections:
-        - Abstract
-        - Introduction
-        - Methods
-        - Results
-        - Discussion
-        - Conclusion
+        Generate a structured outline for a research report with the following title:
         
         Title: {title}
         
-        Queries and Answers:
+        Based on the following questions and answers:
+        
         {json.dumps(qa_pairs, indent=2)}
         
-        For each section, provide:
-        1. A brief description of what should be included
-        2. Key points to cover
-        3. Any subsections that should be included
+        The report should have the following sections:
+        1. Abstract - A brief summary of the entire report
+        2. Introduction - Background information and context
+        3. Methods - How the research was conducted
+        4. Results - Key findings from the research
+        5. Discussion - Interpretation of results and implications
+        6. Conclusion - Summary of key points and future directions
         
-        Return the structure as a JSON object with sections as keys and their details as values.
+        For each section, provide:
+        - A brief description of what should be included
+        - Key points to cover
+        
+        Return the outline as a JSON object with the following structure:
+        {{
+            "abstract": {{
+                "description": "...",
+                "key_points": ["...", "..."]
+            }},
+            "introduction": {{
+                "description": "...",
+                "key_points": ["...", "..."]
+            }},
+            ...
+        }}
         """
         
         system_prompt = """
@@ -122,7 +138,18 @@ class WriterAgent(BaseAgent):
         based on a set of queries and answers. The structure should follow standard academic format with
         abstract, introduction, methods, results, discussion, and conclusion sections.
         
-        Return your plan as a JSON object with sections as keys and their details as values.
+        Return your plan as a JSON object with the following structure:
+        {{
+            "abstract": {{
+                "description": "...",
+                "key_points": ["...", "..."]
+            }},
+            "introduction": {{
+                "description": "...",
+                "key_points": ["...", "..."]
+            }},
+            ...
+        }}
         """
         
         response = self.llm_client.generate(
@@ -148,8 +175,7 @@ class WriterAgent(BaseAgent):
                 if section not in report_structure:
                     report_structure[section] = {
                         "description": f"This section contains the {section} of the report.",
-                        "key_points": [],
-                        "subsections": []
+                        "key_points": []
                     }
             
             # Add queries and answers to the structure
@@ -167,39 +193,33 @@ class WriterAgent(BaseAgent):
                 "qa_pairs": qa_pairs,
                 "abstract": {
                     "description": "This section contains the abstract of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 },
                 "introduction": {
                     "description": "This section contains the introduction of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 },
                 "methods": {
                     "description": "This section contains the methods of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 },
                 "results": {
                     "description": "This section contains the results of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 },
                 "discussion": {
                     "description": "This section contains the discussion of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 },
                 "conclusion": {
                     "description": "This section contains the conclusion of the report.",
-                    "key_points": [],
-                    "subsections": []
+                    "key_points": []
                 }
             }
     
-    def generate_section(self, section_type: str, content: Dict[str, Any]) -> str:
+    def generate_section(self, section_type: str, content: Any) -> str:
         """Generate LaTeX code for a section."""
-        # Prepare prompt based on section type
+        # Handle different section types
         if section_type == "abstract":
             return self._generate_abstract(content)
         elif section_type == "introduction":
@@ -501,10 +521,19 @@ class WriterAgent(BaseAgent):
         
         return response.strip()
     
-    def _generate_generic_section(self, section_type: str, content: Dict[str, Any]) -> str:
+    def _generate_generic_section(self, section_type: str, content: Any) -> str:
         """Generate LaTeX code for a generic section."""
-        description = content.get("description", "")
-        key_points = content.get("key_points", [])
+        # Handle string content
+        if isinstance(content, str):
+            description = content
+            key_points = []
+        # Handle dictionary content
+        elif isinstance(content, dict):
+            description = content.get("description", "")
+            key_points = content.get("key_points", [])
+        else:
+            description = str(content)
+            key_points = []
         
         prompt = f"""
         Generate LaTeX code for a {section_type} section of a research report with the following details:
@@ -541,52 +570,199 @@ class WriterAgent(BaseAgent):
     def _compile_latex_report(self, title: str, sections: Dict[str, str], 
                             output_path: str) -> str:
         """Compile the LaTeX report."""
-        # Create a temporary directory for LaTeX files
-        with tempfile.TemporaryDirectory(dir=self.latex_temp_dir) as temp_dir:
-            # Create the LaTeX file
-            latex_file_path = os.path.join(temp_dir, "report.tex")
+        # Generate LaTeX document
+        latex_code = self._generate_latex_document(title, sections)
+        
+        # Create a temporary directory
+        temp_dir = tempfile.mkdtemp(dir=self.latex_temp_dir)
+        
+        # Write LaTeX code to file
+        latex_file_path = os.path.join(temp_dir, "report.tex")
+        with open(latex_file_path, "w", encoding="utf-8") as f:
+            f.write(latex_code)
+        
+        # Save the LaTeX source file to the output directory
+        latex_output_path = output_path.replace(".pdf", ".tex")
+        os.makedirs(os.path.dirname(os.path.abspath(latex_output_path)), exist_ok=True)
+        with open(latex_output_path, "w", encoding="utf-8") as f:
+            f.write(latex_code)
+        
+        # Also create a simple HTML version
+        html_output_path = output_path.replace(".pdf", ".html")
+        html_content = self._generate_html_document(title, sections)
+        with open(html_output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        
+        # Also create a simple Markdown version
+        md_output_path = output_path.replace(".pdf", ".md")
+        md_content = self._generate_markdown_document(title, sections)
+        with open(md_output_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+        
+        # Try to compile LaTeX to PDF
+        try:
+            # Check if pdflatex is installed
+            subprocess.run(
+                ["which", "pdflatex"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             
-            with open(latex_file_path, "w") as f:
-                f.write(self._generate_latex_document(title, sections))
+            # Compile LaTeX to PDF
+            subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "report.tex"],
+                cwd=temp_dir,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             
-            # Compile the LaTeX file
-            try:
-                # Run pdflatex twice to resolve references
-                subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "report.tex"],
-                    cwd=temp_dir,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "report.tex"],
-                    cwd=temp_dir,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                # Copy the PDF to the output path
-                pdf_file_path = os.path.join(temp_dir, "report.pdf")
-                
-                # Ensure the output directory exists
-                os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-                
-                # Copy the PDF
-                with open(pdf_file_path, "rb") as src, open(output_path, "wb") as dst:
-                    dst.write(src.read())
-                
-                return output_path
+            # Run again for references
+            subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "report.tex"],
+                cwd=temp_dir,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             
-            except subprocess.CalledProcessError as e:
-                print(f"Error compiling LaTeX: {e}")
-                print(f"stdout: {e.stdout.decode('utf-8')}")
-                print(f"stderr: {e.stderr.decode('utf-8')}")
-                
-                # Return the LaTeX file path as a fallback
-                return latex_file_path
+            # Copy the PDF to the output path
+            pdf_file_path = os.path.join(temp_dir, "report.pdf")
+            
+            # Ensure the output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            
+            # Copy the PDF
+            with open(pdf_file_path, "rb") as src, open(output_path, "wb") as dst:
+                dst.write(src.read())
+            
+            print(f"PDF report generated: {output_path}")
+            return output_path
+            
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"LaTeX compilation failed: {e}")
+            print("Falling back to HTML and Markdown versions")
+            
+            # Return the HTML file path as a fallback
+            print(f"HTML report generated: {html_output_path}")
+            print(f"Markdown report generated: {md_output_path}")
+            print(f"LaTeX source saved: {latex_output_path}")
+            
+            return html_output_path
+    
+    def _generate_html_document(self, title: str, sections: Dict[str, str]) -> str:
+        """Generate a simple HTML document from the LaTeX sections."""
+        html = []
+        
+        # HTML header
+        html.append("<!DOCTYPE html>")
+        html.append("<html>")
+        html.append("<head>")
+        html.append(f"<title>{title}</title>")
+        html.append("<style>")
+        html.append("body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }")
+        html.append("h1 { text-align: center; margin-bottom: 30px; }")
+        html.append("h2 { margin-top: 30px; border-bottom: 1px solid #ddd; padding-bottom: 10px; }")
+        html.append("p { margin-bottom: 15px; }")
+        html.append("</style>")
+        html.append("</head>")
+        html.append("<body>")
+        
+        # Title
+        html.append(f"<h1>{title}</h1>")
+        
+        # Abstract
+        if "abstract" in sections:
+            html.append("<div class='abstract'>")
+            html.append("<h2>Abstract</h2>")
+            html.append(self._latex_to_html(sections["abstract"]))
+            html.append("</div>")
+        
+        # Main sections
+        section_order = ["introduction", "methods", "results", "discussion", "conclusion"]
+        
+        for section in section_order:
+            if section in sections:
+                html.append(f"<h2>{section.capitalize()}</h2>")
+                html.append(self._latex_to_html(sections[section]))
+        
+        # HTML footer
+        html.append("</body>")
+        html.append("</html>")
+        
+        return "\n".join(html)
+    
+    def _generate_markdown_document(self, title: str, sections: Dict[str, str]) -> str:
+        """Generate a simple Markdown document from the LaTeX sections."""
+        md = []
+        
+        # Title
+        md.append(f"# {title}")
+        md.append("")
+        
+        # Abstract
+        if "abstract" in sections:
+            md.append("## Abstract")
+            md.append("")
+            md.append(self._latex_to_markdown(sections["abstract"]))
+            md.append("")
+        
+        # Main sections
+        section_order = ["introduction", "methods", "results", "discussion", "conclusion"]
+        
+        for section in section_order:
+            if section in sections:
+                md.append(f"## {section.capitalize()}")
+                md.append("")
+                md.append(self._latex_to_markdown(sections[section]))
+                md.append("")
+        
+        return "\n".join(md)
+    
+    def _latex_to_html(self, latex: str) -> str:
+        """Convert simple LaTeX to HTML."""
+        # Replace common LaTeX commands with HTML
+        html = latex
+        
+        # Replace sections and subsections
+        html = html.replace("\\section{", "<h2>").replace("}", "</h2>")
+        html = html.replace("\\subsection{", "<h3>").replace("}", "</h3>")
+        html = html.replace("\\subsubsection{", "<h4>").replace("}", "</h4>")
+        
+        # Replace formatting
+        html = html.replace("\\textbf{", "<strong>").replace("}", "</strong>")
+        html = html.replace("\\textit{", "<em>").replace("}", "</em>")
+        
+        # Replace paragraphs
+        html = html.replace("\n\n", "</p><p>")
+        
+        # Wrap in paragraph tags
+        html = f"<p>{html}</p>"
+        
+        # Fix double paragraph tags
+        html = html.replace("<p><p>", "<p>").replace("</p></p>", "</p>")
+        
+        return html
+    
+    def _latex_to_markdown(self, latex: str) -> str:
+        """Convert simple LaTeX to Markdown."""
+        # Replace common LaTeX commands with Markdown
+        md = latex
+        
+        # Replace sections and subsections
+        md = md.replace("\\section{", "## ").replace("}", "")
+        md = md.replace("\\subsection{", "### ").replace("}", "")
+        md = md.replace("\\subsubsection{", "#### ").replace("}", "")
+        
+        # Replace formatting
+        md = md.replace("\\textbf{", "**").replace("}", "**")
+        md = md.replace("\\textit{", "*").replace("}", "*")
+        
+        # Replace paragraphs
+        md = md.replace("\n\n", "\n\n")
+        
+        return md
     
     def _generate_latex_document(self, title: str, sections: Dict[str, str]) -> str:
         """Generate the complete LaTeX document."""
@@ -653,7 +829,7 @@ class WriterAgent(BaseAgent):
         
         return "\n".join(latex_code)
     
-    def run(self, title: str, queries: List[str], answers: List[str], output_path: str = "report.pdf"):
+    def run(self, title: str, queries: List[str], answers: List[Any], output_path: str = "report.pdf"):
         """Run the report generation process."""
         print(f"Generating report: {title}")
         report_path = self.generate_report(title, queries, answers, output_path)

@@ -14,6 +14,7 @@ import logging
 
 from crew_ai.agents.base_agent import BaseAgent
 from crew_ai.utils.database import SQLiteDB, Neo4jDB
+from crew_ai.utils.temp_sqlite import TempSQLiteDB
 from crew_ai.models.llm_client import LLMClient, get_llm_client
 from crew_ai.utils.messaging import MessageBroker
 from crew_ai.config.config import Config, LLMProvider
@@ -37,7 +38,8 @@ class KnowledgeGraphAgent(BaseAgent):
                  llm_provider: Optional[LLMProvider] = None,
                  message_broker: Optional[MessageBroker] = None,
                  sqlite_db: Optional[SQLiteDB] = None,
-                 neo4j_db: Optional[Neo4jDB] = None):
+                 neo4j_db: Optional[Neo4jDB] = None,
+                 temp_db_path: Optional[str] = None):
         """Initialize the KnowledgeGraphAgent.
         
         Args:
@@ -47,13 +49,24 @@ class KnowledgeGraphAgent(BaseAgent):
             message_broker: Message broker for agent communication
             sqlite_db: SQLite database instance
             neo4j_db: Neo4j database instance
+            temp_db_path: Path to the temporary SQLite database
         """
         super().__init__(agent_id or "knowledge_graph_agent", 
                          llm_client, 
                          llm_provider, 
                          message_broker)
         
-        self.sqlite_db = sqlite_db or SQLiteDB()
+        # If sqlite_db is provided and it's a TempSQLiteDB, use it for both
+        if sqlite_db and isinstance(sqlite_db, TempSQLiteDB):
+            self.sqlite_db = sqlite_db
+            self.temp_db = sqlite_db
+            logger.info(f"Using shared database for both SQLite and temp operations")
+        else:
+            # Otherwise, initialize separate databases
+            self.sqlite_db = sqlite_db or SQLiteDB()
+            self.temp_db = TempSQLiteDB(temp_db_path) if temp_db_path else None
+            logger.info(f"Using separate databases for SQLite and temp operations")
+        
         self.neo4j_db = neo4j_db or Neo4jDB()
         
         # Load NLP model for fallback entity extraction
@@ -68,525 +81,44 @@ class KnowledgeGraphAgent(BaseAgent):
         self.register_handler("create_knowledge_graph", self._handle_create_knowledge_graph)
         self.register_handler("extract_entities", self._handle_extract_entities)
         self.register_handler("get_graph_stats", self._handle_get_graph_stats)
-        self.register_handler("semantic_search", self._handle_semantic_search)
-        self.register_handler("get_entity_context", self._handle_get_entity_context)
+        self.register_handler("transfer_data_to_temp_db", self._handle_transfer_data_to_temp_db)
+        
+        # Only register these handlers if we're using the message broker (legacy orchestrator)
+        if message_broker:
+            self.register_handler("semantic_search", self._handle_semantic_search)
+            self.register_handler("get_entity_context", self._handle_get_entity_context)
     
-    def _handle_create_knowledge_graph(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
-        """Handle create_knowledge_graph messages.
+    def _handle_transfer_data_to_temp_db(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle transfer_data_to_temp_db messages.
         
         Args:
             message: The message containing the request
             correlation_id: Correlation ID for tracking the request
             
         Returns:
-            Response with the results of the knowledge graph creation
+            Response with the results of the data transfer
         """
         try:
             max_content_items = message.get("data", {}).get("max_content_items")
             source_filter = message.get("data", {}).get("source_filter")
             
-            results = self.create_knowledge_graph(max_content_items, source_filter)
+            results = self.transfer_data_to_temp_db(max_content_items, source_filter)
             return {"status": "success", "results": results}
         except Exception as e:
-            logger.error(f"Error creating knowledge graph: {e}", exc_info=True)
+            logger.error(f"Error transferring data to temp DB: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
     
-    def _handle_extract_entities(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
-        """Handle extract_entities messages.
+    def transfer_data_to_temp_db(self, max_content_items: Optional[int] = None, source_filter: Optional[str] = None) -> Dict[str, Any]:
+        """Transfer data from SQLite to the temporary database.
         
         Args:
-            message: The message containing the request
-            correlation_id: Correlation ID for tracking the request
-            
-        Returns:
-            Response with the extracted entities
-        """
-        try:
-            content_id = message.get("data", {}).get("content_id")
-            
-            if not content_id:
-                return {"status": "error", "error": "Content ID is required"}
-            
-            with self.sqlite_db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT content FROM content WHERE id = ?", (content_id,))
-                row = cursor.fetchone()
-                
-                if not row:
-                    return {"status": "error", "error": f"Content with ID {content_id} not found"}
-                
-                content_text = row[0]
-                entities = self._extract_entities_from_text(content_text)
-                
-                # Store entities in SQLite
-                for entity_type, entity_dict in entities.items():
-                    for entity_name, entity_data in entity_dict.items():
-                        # Store entity
-                        entity_id = str(uuid.uuid4())
-                        metadata = {
-                            "count": entity_data["count"],
-                            "importance": entity_data["importance"]
-                        }
-                        
-                        with conn:
-                            cursor.execute(
-                                "INSERT INTO entities (id, name, entity_type, metadata) VALUES (?, ?, ?, ?)",
-                                (entity_id, entity_name, entity_type, json.dumps(metadata))
-                            )
-                            
-                            # Link entity to content
-                            mention_id = str(uuid.uuid4())
-                            cursor.execute(
-                                "INSERT INTO entity_mentions (id, entity_id, content_id) VALUES (?, ?, ?)",
-                                (mention_id, entity_id, content_id)
-                            )
-                
-                return {"status": "success", "entities": entities}
-        except Exception as e:
-            logger.error(f"Error extracting entities: {e}", exc_info=True)
-            return {"status": "error", "error": str(e)}
-    
-    def _handle_get_graph_stats(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
-        """Handle get_graph_stats messages.
-        
-        Args:
-            message: The message containing the request
-            correlation_id: Correlation ID for tracking the request
-            
-        Returns:
-            Response with graph statistics
-        """
-        try:
-            # Query Neo4j for graph statistics
-            node_stats = self.neo4j_db.run_query("""
-                MATCH (n)
-                RETURN labels(n) AS node_type, count(*) AS count
-                ORDER BY count DESC
-            """)
-            
-            relationship_stats = self.neo4j_db.run_query("""
-                MATCH ()-[r]->()
-                RETURN type(r) AS relationship_type, count(*) AS count
-                ORDER BY count DESC
-            """)
-            
-            if not node_stats or not relationship_stats:
-                # Fallback to SQLite stats if Neo4j query fails
-                with self.sqlite_db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    
-                    # Get entity type counts
-                    cursor.execute("""
-                        SELECT entity_type, COUNT(*) as count
-                        FROM entities
-                        GROUP BY entity_type
-                        ORDER BY count DESC
-                    """)
-                    node_stats = [{"node_type": row[0], "count": row[1]} for row in cursor.fetchall()]
-                    
-                    # Get mention counts as a proxy for relationships
-                    cursor.execute("""
-                        SELECT COUNT(*) as count
-                        FROM entity_mentions
-                    """)
-                    mention_count = cursor.fetchone()[0]
-                    relationship_stats = [{"relationship_type": "MENTIONS", "count": mention_count}]
-            
-            return {
-                "status": "success",
-                "node_stats": node_stats,
-                "relationship_stats": relationship_stats,
-                "total_nodes": sum(stat["count"] for stat in node_stats) if node_stats else 0,
-                "total_relationships": sum(stat["count"] for stat in relationship_stats) if relationship_stats else 0
-            }
-        except Exception as e:
-            logger.error(f"Error getting graph stats: {e}", exc_info=True)
-            return {"status": "error", "error": str(e)}
-    
-    def _handle_semantic_search(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
-        """Handle semantic_search messages.
-        
-        Args:
-            message: The message containing the request
-            correlation_id: Correlation ID for tracking the request
-            
-        Returns:
-            Response with search results
-        """
-        try:
-            query = message.get("data", {}).get("query")
-            entity_type = message.get("data", {}).get("entity_type")
-            limit = message.get("data", {}).get("limit", 10)
-            
-            if not query:
-                return {"status": "error", "error": "Query is required"}
-            
-            # Generate query embedding using LLM
-            try:
-                # This would normally use an embedding model
-                # For now, we'll use a simple fallback
-                query_embedding = [0.5] * 10  # Placeholder embedding
-                
-                results = self.neo4j_db.semantic_search(entity_type, query_embedding, limit)
-                
-                if not results:
-                    # Fallback to SQLite text search
-                    with self.sqlite_db.get_connection() as conn:
-                        cursor = conn.cursor()
-                        search_term = f"%{query}%"
-                        
-                        if entity_type:
-                            cursor.execute("""
-                                SELECT e.id, e.name, e.entity_type, e.metadata
-                                FROM entities e
-                                WHERE e.entity_type = ? AND e.name LIKE ?
-                                LIMIT ?
-                            """, (entity_type, search_term, limit))
-                        else:
-                            cursor.execute("""
-                                SELECT e.id, e.name, e.entity_type, e.metadata
-                                FROM entities e
-                                WHERE e.name LIKE ?
-                                LIMIT ?
-                            """, (search_term, limit))
-                        
-                        results = []
-                        for row in cursor.fetchall():
-                            metadata = json.loads(row[3]) if row[3] else {}
-                            results.append({
-                                "id": row[0],
-                                "name": row[1],
-                                "entity_type": row[2],
-                                "score": 0.5,  # Placeholder score
-                                "metadata": metadata
-                            })
-                
-                return {"status": "success", "results": results}
-            except Exception as e:
-                logger.error(f"Error in semantic search: {e}", exc_info=True)
-                return {"status": "error", "error": str(e)}
-        except Exception as e:
-            logger.error(f"Error handling semantic search: {e}", exc_info=True)
-            return {"status": "error", "error": str(e)}
-    
-    def _handle_get_entity_context(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
-        """Handle get_entity_context messages.
-        
-        Args:
-            message: The message containing the request
-            correlation_id: Correlation ID for tracking the request
-            
-        Returns:
-            Response with entity context
-        """
-        try:
-            entity_name = message.get("data", {}).get("entity_name")
-            entity_id = message.get("data", {}).get("entity_id")
-            limit = message.get("data", {}).get("limit", 5)
-            
-            if not entity_name and not entity_id:
-                return {"status": "error", "error": "Either entity_name or entity_id is required"}
-            
-            try:
-                if entity_id:
-                    # Get entity context from SQLite
-                    with self.sqlite_db.get_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            SELECT e.name, e.entity_type
-                            FROM entities e
-                            WHERE e.id = ?
-                        """, (entity_id,))
-                        
-                        entity_row = cursor.fetchone()
-                        if not entity_row:
-                            return {"status": "error", "error": f"Entity with ID {entity_id} not found"}
-                        
-                        entity_name = entity_row[0]
-                        entity_type = entity_row[1]
-                        
-                        # Get content related to this entity
-                        cursor.execute("""
-                            SELECT c.id, c.title, c.summary, c.url
-                            FROM content c
-                            JOIN entity_mentions em ON c.id = em.content_id
-                            JOIN entities e ON em.entity_id = e.id
-                            WHERE e.id = ?
-                            LIMIT ?
-                        """, (entity_id, limit))
-                        
-                        content_items = []
-                        for row in cursor.fetchall():
-                            content_items.append({
-                                "id": row[0],
-                                "title": row[1],
-                                "summary": row[2],
-                                "url": row[3]
-                            })
-                        
-                        return {
-                            "status": "success",
-                            "entity": {
-                                "id": entity_id,
-                                "name": entity_name,
-                                "type": entity_type
-                            },
-                            "content_items": content_items
-                        }
-                else:
-                    # Try to get context from Neo4j first
-                    context = self.neo4j_db.get_entity_context(entity_name, limit)
-                    
-                    if not context:
-                        # Fallback to SQLite
-                        with self.sqlite_db.get_connection() as conn:
-                            cursor = conn.cursor()
-                            
-                            # Find entity by name
-                            cursor.execute("""
-                                SELECT e.id, e.entity_type
-                                FROM entities e
-                                WHERE e.name = ?
-                            """, (entity_name,))
-                            
-                            entity_row = cursor.fetchone()
-                            if not entity_row:
-                                return {"status": "error", "error": f"Entity with name '{entity_name}' not found"}
-                            
-                            entity_id = entity_row[0]
-                            entity_type = entity_row[1]
-                            
-                            # Get content related to this entity
-                            cursor.execute("""
-                                SELECT c.id, c.title, c.summary, c.url
-                                FROM content c
-                                JOIN entity_mentions em ON c.id = em.content_id
-                                JOIN entities e ON em.entity_id = e.id
-                                WHERE e.id = ?
-                                LIMIT ?
-                            """, (entity_id, limit))
-                            
-                            content_items = []
-                            for row in cursor.fetchall():
-                                content_items.append({
-                                    "id": row[0],
-                                    "title": row[1],
-                                    "summary": row[2],
-                                    "url": row[3]
-                                })
-                            
-                            context = content_items
-                    
-                    return {
-                        "status": "success",
-                        "entity": {
-                            "name": entity_name,
-                            "type": entity_type if 'entity_type' in locals() else "Unknown"
-                        },
-                        "content_items": context
-                    }
-            except Exception as e:
-                logger.error(f"Error getting entity context: {e}", exc_info=True)
-                return {"status": "error", "error": str(e)}
-        except Exception as e:
-            logger.error(f"Error handling get entity context: {e}", exc_info=True)
-            return {"status": "error", "error": str(e)}
-
-    def _extract_entities_from_text(self, text: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """Extract entities from text using LLM with robust fallback mechanisms.
-        
-        Args:
-            text: The text to extract entities from
-            
-        Returns:
-            Dictionary of entity types to entity names to entity data
-        """
-        entities = {
-            "Person": {},
-            "Organization": {},
-            "Location": {},
-            "Concept": {},
-            "Technology": {},
-            "Paper": {}
-        }
-        
-        # Truncate text if it's too long
-        if len(text) > 4000:
-            text = text[:4000] + "..."
-        
-        prompt = f"""
-        Extract named entities from the following text. Categorize them into these types:
-        - Person: individual people
-        - Organization: companies, institutions, groups
-        - Location: places, geographical areas
-        - Concept: abstract ideas, theories, frameworks
-        - Technology: tools, programming languages, technical concepts
-        - Paper: research papers, articles, publications
-        
-        For each entity, include a count (how many times it appears) and an importance score (0.0-1.0).
-        
-        Return the results as a JSON object with this structure:
-        {{
-            "Person": {{
-                "person_name": {{"count": 1, "importance": 0.7}}
-            }},
-            "Organization": {{
-                "org_name": {{"count": 2, "importance": 0.8}}
-            }},
-            ...
-        }}
-        
-        Text: {text}
-        """
-        
-        system_prompt = """
-        You are an entity extraction system. Extract named entities from text and categorize them.
-        Return ONLY a JSON object with the specified structure, no explanation or other text.
-        """
-        
-        try:
-            if not self.llm_client:
-                # If no LLM client is available, use fallback method
-                logger.warning("No LLM client available, using fallback entity extraction")
-                return self._fallback_entity_extraction(text)
-                
-            response = self.llm_client.generate(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=0.2,
-                max_tokens=1000
-            )
-            
-            # Extract JSON object from response
-            response = response.strip()
-            if response.startswith("```json"):
-                response = response[7:]
-            if response.endswith("```"):
-                response = response[:-3]
-            
-            # Parse JSON object
-            extracted_entities = json.loads(response)
-            
-            # Validate and merge with our entity structure
-            for entity_type, entity_dict in extracted_entities.items():
-                if entity_type in entities and isinstance(entity_dict, dict):
-                    for entity_name, entity_data in entity_dict.items():
-                        if isinstance(entity_data, dict) and "count" in entity_data and "importance" in entity_data:
-                            entities[entity_type][entity_name] = {
-                                "count": entity_data["count"],
-                                "importance": entity_data["importance"]
-                            }
-            
-            return entities
-        
-        except Exception as e:
-            logger.error(f"Error extracting entities with LLM: {e}", exc_info=True)
-            
-            # Fallback to simple entity extraction
-            return self._fallback_entity_extraction(text)
-    
-    def _fallback_entity_extraction(self, text: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """Fallback entity extraction when LLM extraction fails.
-        
-        Args:
-            text: The text to extract entities from
-            
-        Returns:
-            Dictionary of entity types to entity names to entity data
-        """
-        entities = {
-            "Person": {},
-            "Organization": {},
-            "Location": {},
-            "Concept": {},
-            "Technology": {},
-            "Paper": {}
-        }
-        
-        try:
-            if self.has_spacy:
-                # Use spaCy for entity extraction
-                doc = self.nlp(text[:10000])  # Limit text length for performance
-                
-                # Map spaCy entity types to our types
-                entity_type_map = {
-                    "PERSON": "Person",
-                    "ORG": "Organization",
-                    "GPE": "Location",
-                    "LOC": "Location",
-                    "PRODUCT": "Technology",
-                    "WORK_OF_ART": "Paper"
-                }
-                
-                # Extract entities
-                for ent in doc.ents:
-                    mapped_type = entity_type_map.get(ent.label_, "Concept")
-                    
-                    if ent.text in entities[mapped_type]:
-                        entities[mapped_type][ent.text]["count"] += 1
-                    else:
-                        entities[mapped_type][ent.text] = {
-                            "count": 1,
-                            "importance": 0.5  # Default importance
-                        }
-                
-                # Extract noun chunks as concepts
-                for chunk in doc.noun_chunks:
-                    if len(chunk.text) > 3 and chunk.text[0].isupper():
-                        if chunk.text in entities["Concept"]:
-                            entities["Concept"][chunk.text]["count"] += 1
-                        else:
-                            entities["Concept"][chunk.text] = {
-                                "count": 1,
-                                "importance": 0.4  # Lower importance for noun chunks
-                            }
-            else:
-                # Simple regex-based extraction
-                # Extract potential entities based on capitalization
-                words = text.split()
-                capitalized_words = [word for word in words if word and word[0].isupper()]
-                
-                # Count occurrences
-                word_counts = {}
-                for word in capitalized_words:
-                    # Clean the word
-                    clean_word = re.sub(r'[^\w\s]', '', word)
-                    if len(clean_word) < 3:
-                        continue
-                        
-                    if clean_word in word_counts:
-                        word_counts[clean_word] += 1
-                    else:
-                        word_counts[clean_word] = 1
-                
-                # Add to entities (default to Concept)
-                for word, count in word_counts.items():
-                    importance = min(1.0, 0.3 + (count / 10.0))
-                    entities["Concept"][word] = {
-                        "count": count,
-                        "importance": importance
-                    }
-            
-            return entities
-            
-        except Exception as e:
-            logger.error(f"Error in fallback entity extraction: {e}", exc_info=True)
-            
-            # Return minimal entity set to avoid further errors
-            entities["Concept"]["general topic"] = {"count": 1, "importance": 0.5}
-            return entities
-    
-    def create_knowledge_graph(self, max_content_items: Optional[int] = None, source_filter: Optional[str] = None) -> Dict[str, Any]:
-        """Create a knowledge graph from the data in SQLite.
-        
-        Args:
-            max_content_items: Maximum number of content items to process
+            max_content_items: Maximum number of content items to transfer
             source_filter: Filter content by source
             
         Returns:
-            Results of the knowledge graph creation process
+            Results of the data transfer
         """
-        logger.info("Starting knowledge graph creation...")
+        logger.info("Starting data transfer to temporary database...")
         start_time = time.time()
         
         try:
@@ -611,7 +143,7 @@ class KnowledgeGraphAgent(BaseAgent):
                 
                 cursor.execute(query, params)
                 
-                all_content = []
+                content_items = []
                 for row in cursor.fetchall():
                     metadata = json.loads(row[7]) if row[7] else {}
                     content_item = {
@@ -629,180 +161,668 @@ class KnowledgeGraphAgent(BaseAgent):
                             "url": row[10]
                         }
                     }
-                    all_content.append(content_item)
+                    content_items.append(content_item)
             
-            logger.info(f"Processing {len(all_content)} content items...")
+            logger.info(f"Found {len(content_items)} content items to transfer")
             
-            # Process each content item
-            entity_nodes = {}  # Map of entity name to Neo4j node ID
-            content_nodes = {}  # Map of content ID to Neo4j node ID
-            entity_types = set()
+            # Transfer content to temp DB
+            content_count = 0
+            entity_count = 0
+            relationship_count = 0
             
-            # Create a temporary graph in memory for similarity analysis
-            temp_graph = nx.Graph()
-            
-            # Extract text for TF-IDF
-            content_texts = []
-            content_ids = []
-            for item in all_content:
-                content_text = ""
-                if item["title"]:
-                    content_text += item["title"] + " "
-                if item["summary"]:
-                    content_text += item["summary"] + " "
-                if item["content"]:
-                    content_text += item["content"]
+            for content_item in tqdm(content_items, desc="Transferring content"):
+                # Store source
+                source_id = self.temp_db.store_source(
+                    content_item["source"]["name"],
+                    content_item["source"]["url"]
+                )
                 
-                content_texts.append(content_text)
-                content_ids.append(item["id"])
-            
-            # Calculate TF-IDF vectors for content similarity
-            try:
-                vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
-                tfidf_matrix = vectorizer.fit_transform(content_texts)
+                # Store content
+                content_id = self.temp_db.store_content(content_item, source_id)
+                content_count += 1
                 
-                # Calculate pairwise similarity
-                cosine_sim = cosine_similarity(tfidf_matrix)
-            except Exception as e:
-                logger.error(f"Error calculating content similarity: {e}", exc_info=True)
-                cosine_sim = None
-            
-            # Process content items
-            for i, content_item in enumerate(tqdm(all_content, desc="Processing content")):
-                content_id = content_item["id"]
+                # Extract entities
                 content_text = content_item.get("content", "")
-                if not content_text and content_item.get("summary"):
-                    content_text = content_item["summary"]
+                if not content_text:
+                    content_text = content_item.get("summary", "")
                 
-                source_url = content_item.get("url", "")
-                source_title = content_item.get("title", "")
-                source_name = content_item["source"]["name"] if "source" in content_item else "unknown"
-                
-                # Create content node in Neo4j
-                try:
-                    content_node_id = self.neo4j_db.create_entity_node(
-                        entity_type="Content",
-                        name=f"Content_{content_id}",
-                        properties={
-                            "content_id": content_id,
-                            "title": source_title,
-                            "url": source_url,
-                            "source": source_name,
-                            "text_snippet": content_text[:200] + "..." if len(content_text) > 200 else content_text
-                        }
-                    )
-                    content_nodes[content_id] = content_node_id
-                except Exception as e:
-                    logger.error(f"Error creating content node: {e}", exc_info=True)
-                    continue
-                
-                # Extract entities from content
                 entities = self._extract_entities_from_text(content_text)
                 
-                # Create entity nodes and relationships
-                for entity_type, entity_list in entities.items():
-                    for entity_name, entity_data in entity_list.items():
+                # Store entities and create relationships
+                entity_ids = {}
+                
+                for entity_type, entity_dict in entities.items():
+                    for entity_name, entity_data in entity_dict.items():
                         # Skip if entity name is too short or just numbers
                         if len(entity_name) < 3 or entity_name.isdigit():
                             continue
                         
+                        # Store entity
+                        entity_id = self.temp_db.store_entity(
+                            entity_name,
+                            entity_type,
+                            {
+                                "count": entity_data["count"],
+                                "importance": entity_data["importance"]
+                            }
+                        )
+                        
+                        # Link entity to content
+                        self.temp_db.link_entity_to_content(entity_id, content_id)
+                        
+                        entity_ids[entity_name] = entity_id
+                        entity_count += 1
+                
+                # Create relationships between co-occurring entities
+                for entity1_name, entity1_id in entity_ids.items():
+                    for entity2_name, entity2_id in entity_ids.items():
+                        if entity1_name != entity2_name:
+                            self.temp_db.create_relationship(
+                                entity1_id,
+                                entity2_id,
+                                "CO_OCCURS_WITH",
+                                1.0,
+                                {
+                                    "content_id": content_id
+                                }
+                            )
+                            relationship_count += 1
+            
+            end_time = time.time()
+            
+            return {
+                "status": "success",
+                "execution_time": end_time - start_time,
+                "content_count": content_count,
+                "entity_count": entity_count,
+                "relationship_count": relationship_count
+            }
+        except Exception as e:
+            logger.error(f"Error transferring data to temp DB: {e}", exc_info=True)
+            end_time = time.time()
+            
+            return {
+                "status": "error",
+                "error": str(e),
+                "execution_time": end_time - start_time
+            }
+    
+    def _handle_create_knowledge_graph(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle create_knowledge_graph messages.
+        
+        Args:
+            message: The message containing the request
+            correlation_id: Correlation ID for tracking the request
+            
+        Returns:
+            Response with the results of the knowledge graph creation
+        """
+        try:
+            max_content_items = message.get("data", {}).get("max_content_items")
+            source_filter = message.get("data", {}).get("source_filter")
+            use_temp_db = message.get("data", {}).get("use_temp_db", True)
+            
+            results = self.create_knowledge_graph(max_content_items, source_filter, use_temp_db)
+            return {"status": "success", "results": results}
+        except Exception as e:
+            logger.error(f"Error creating knowledge graph: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+    
+    def _handle_extract_entities(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle extract_entities messages.
+        
+        Args:
+            message: The message containing the request
+            correlation_id: Correlation ID for tracking the request
+            
+        Returns:
+            Response with the extracted entities
+        """
+        try:
+            content_id = message.get("data", {}).get("content_id")
+            use_temp_db = message.get("data", {}).get("use_temp_db", False)
+            
+            if not content_id:
+                return {"status": "error", "error": "Content ID is required"}
+            
+            db = self.temp_db if use_temp_db else self.sqlite_db
+            
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT content FROM content WHERE id = ?", (content_id,))
+                row = cursor.fetchone()
+                
+                if not row:
+                    return {"status": "error", "error": f"Content with ID {content_id} not found"}
+                
+                content_text = row[0]
+                entities = self._extract_entities_from_text(content_text)
+                
+                # Store entities in the database
+                for entity_type, entity_dict in entities.items():
+                    for entity_name, entity_data in entity_dict.items():
+                        # Skip if entity name is too short or just numbers
+                        if len(entity_name) < 3 or entity_name.isdigit():
+                            continue
+                            
+                        # Store entity
+                        entity_id = db.store_entity(
+                            entity_name,
+                            entity_type,
+                            {
+                                "count": entity_data["count"],
+                                "importance": entity_data["importance"]
+                            }
+                        )
+                        
+                        # Link entity to content
+                        db.link_entity_to_content(entity_id, content_id)
+                
+                return {"status": "success", "entities": entities}
+        except Exception as e:
+            logger.error(f"Error extracting entities: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+    
+    def _handle_get_graph_stats(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle get_graph_stats messages.
+        
+        Args:
+            message: The message containing the request
+            correlation_id: Correlation ID for tracking the request
+            
+        Returns:
+            Response with graph statistics
+        """
+        try:
+            use_temp_db = message.get("data", {}).get("use_temp_db", False)
+            
+            # Query Neo4j for graph statistics
+            node_stats = self.neo4j_db.run_query("""
+                MATCH (n)
+                RETURN labels(n) AS node_type, count(*) AS count
+                ORDER BY count DESC
+            """)
+            
+            relationship_stats = self.neo4j_db.run_query("""
+                MATCH ()-[r]->()
+                RETURN type(r) AS relationship_type, count(*) AS count
+                ORDER BY count DESC
+            """)
+            
+            if not node_stats or not relationship_stats:
+                # Fallback to database stats
+                db = self.temp_db if use_temp_db else self.sqlite_db
+                
+                with db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    
+                    # Get entity type counts
+                    cursor.execute("""
+                        SELECT entity_type, COUNT(*) as count
+                        FROM entities
+                        GROUP BY entity_type
+                        ORDER BY count DESC
+                    """)
+                    node_stats = [{"node_type": row[0], "count": row[1]} for row in cursor.fetchall()]
+                    
+                    # Get relationship type counts
+                    if isinstance(db, TempSQLiteDB):
+                        cursor.execute("""
+                            SELECT relationship_type, COUNT(*) as count
+                            FROM relationships
+                            GROUP BY relationship_type
+                            ORDER BY count DESC
+                        """)
+                        relationship_stats = [{"relationship_type": row[0], "count": row[1]} for row in cursor.fetchall()]
+                    else:
+                        # Get mention counts as a proxy for relationships
+                        cursor.execute("""
+                            SELECT COUNT(*) as count
+                            FROM entity_mentions
+                        """)
+                        mention_count = cursor.fetchone()[0]
+                        relationship_stats = [{"relationship_type": "MENTIONS", "count": mention_count}]
+            
+            return {
+                "status": "success",
+                "node_stats": node_stats,
+                "relationship_stats": relationship_stats,
+                "total_nodes": sum(stat["count"] for stat in node_stats) if node_stats else 0,
+                "total_relationships": sum(stat["count"] for stat in relationship_stats) if relationship_stats else 0
+            }
+        except Exception as e:
+            logger.error(f"Error getting graph stats: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+    
+    def _handle_semantic_search(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle semantic_search messages.
+        
+        Args:
+            message: The message containing the request
+            correlation_id: Correlation ID for tracking the request
+            
+        Returns:
+            Response with search results
+        """
+        try:
+            query = message.get("data", {}).get("query", "")
+            limit = message.get("data", {}).get("limit", 10)
+            
+            if not query:
+                return {"status": "error", "error": "No query provided"}
+            
+            # Extract entities from the query
+            query_entities = self._extract_entities_from_text(query)
+            
+            # Flatten entity dictionary
+            entity_names = []
+            for entity_type, entities in query_entities.items():
+                entity_names.extend(list(entities.keys()))
+            
+            results = []
+            
+            # If we have entities, search for them in Neo4j
+            if entity_names:
+                try:
+                    with self.neo4j_db.get_session() as session:
+                        # Search for content related to the entities
+                        cypher_query = """
+                        MATCH (c:Content)-[:MENTIONS]->(e:Entity)
+                        WHERE e.name IN $entity_names
+                        WITH c, count(DISTINCT e) AS entity_count
+                        ORDER BY entity_count DESC
+                        LIMIT $limit
+                        RETURN c.id AS id, c.title AS title, c.summary AS summary, c.url AS url, entity_count
+                        """
+                        
+                        result = session.run(
+                            cypher_query,
+                            {"entity_names": entity_names, "limit": limit}
+                        )
+                        
+                        for record in result:
+                            results.append({
+                                "id": record["id"],
+                                "title": record["title"],
+                                "summary": record["summary"],
+                                "url": record["url"],
+                                "relevance_score": record["entity_count"]
+                            })
+                except Exception as e:
+                    logger.error(f"Neo4j search error: {e}", exc_info=True)
+            
+            # If Neo4j search failed or returned no results, fall back to SQLite
+            if not results:
+                logger.info("Falling back to SQLite search")
+                
+                # Search in SQLite using full-text search if available
+                try:
+                    with self.sqlite_db.get_connection() as conn:
+                        cursor = conn.cursor()
+                        
+                        # Use full-text search if available
+                        try:
+                            cursor.execute(
+                                """
+                                SELECT id, title, summary, url
+                                FROM content
+                                WHERE content MATCH ?
+                                LIMIT ?
+                                """,
+                                (query, limit)
+                            )
+                        except Exception:
+                            # Fall back to basic LIKE search
+                            search_term = f"%{query}%"
+                            cursor.execute(
+                                """
+                                SELECT id, title, summary, url
+                                FROM content
+                                WHERE title LIKE ? OR summary LIKE ? OR content LIKE ?
+                                LIMIT ?
+                                """,
+                                (search_term, search_term, search_term, limit)
+                            )
+                        
+                        for row in cursor.fetchall():
+                            results.append({
+                                "id": row[0],
+                                "title": row[1],
+                                "summary": row[2],
+                                "url": row[3],
+                                "relevance_score": 1  # Default score for SQLite results
+                            })
+                except Exception as e:
+                    logger.error(f"SQLite search error: {e}", exc_info=True)
+            
+            return {
+                "status": "success", 
+                "results": results,
+                "query_entities": entity_names
+            }
+        except Exception as e:
+            logger.error(f"Error in semantic search: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+    
+    def _handle_get_entity_context(self, message: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Handle get_entity_context messages.
+        
+        Args:
+            message: The message containing the request
+            correlation_id: Correlation ID for tracking the request
+            
+        Returns:
+            Response with entity context information
+        """
+        try:
+            entity_name = message.get("data", {}).get("entity_name", "")
+            limit = message.get("data", {}).get("limit", 10)
+            
+            if not entity_name:
+                return {"status": "error", "error": "No entity name provided"}
+            
+            context = []
+            
+            # Try to get context from Neo4j
+            try:
+                with self.neo4j_db.get_session() as session:
+                    # Get content that mentions the entity
+                    cypher_query = """
+                    MATCH (c:Content)-[:MENTIONS]->(e:Entity {name: $entity_name})
+                    RETURN c.id AS id, c.title AS title, c.summary AS summary, c.url AS url
+                    LIMIT $limit
+                    """
+                    
+                    result = session.run(
+                        cypher_query,
+                        {"entity_name": entity_name, "limit": limit}
+                    )
+                    
+                    for record in result:
+                        context.append({
+                            "id": record["id"],
+                            "title": record["title"],
+                            "summary": record["summary"],
+                            "url": record["url"]
+                        })
+                    
+                    # Get related entities
+                    cypher_query = """
+                    MATCH (e1:Entity {name: $entity_name})<-[:MENTIONS]-(c:Content)-[:MENTIONS]->(e2:Entity)
+                    WHERE e1 <> e2
+                    WITH e2, count(c) AS common_content
+                    ORDER BY common_content DESC
+                    LIMIT $limit
+                    RETURN e2.name AS name, e2.type AS type, common_content
+                    """
+                    
+                    result = session.run(
+                        cypher_query,
+                        {"entity_name": entity_name, "limit": limit}
+                    )
+                    
+                    related_entities = []
+                    for record in result:
+                        related_entities.append({
+                            "name": record["name"],
+                            "type": record["type"],
+                            "common_content": record["common_content"]
+                        })
+            except Exception as e:
+                logger.error(f"Neo4j entity context error: {e}", exc_info=True)
+                related_entities = []
+            
+            # If Neo4j failed or returned no results, fall back to SQLite
+            if not context:
+                logger.info("Falling back to SQLite for entity context")
+                
+                try:
+                    with self.sqlite_db.get_connection() as conn:
+                        cursor = conn.cursor()
+                        
+                        # Get content that mentions the entity
+                        cursor.execute(
+                            """
+                            SELECT c.id, c.title, c.summary, c.url
+                            FROM content c
+                            JOIN entity_mentions em ON c.id = em.content_id
+                            JOIN entities e ON em.entity_id = e.id
+                            WHERE e.name = ?
+                            LIMIT ?
+                            """,
+                            (entity_name, limit)
+                        )
+                        
+                        for row in cursor.fetchall():
+                            context.append({
+                                "id": row[0],
+                                "title": row[1],
+                                "summary": row[2],
+                                "url": row[3]
+                            })
+                except Exception as e:
+                    logger.error(f"SQLite entity context error: {e}", exc_info=True)
+            
+            return {
+                "status": "success",
+                "entity_name": entity_name,
+                "context": context,
+                "related_entities": related_entities if 'related_entities' in locals() else []
+            }
+        except Exception as e:
+            logger.error(f"Error getting entity context: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+    
+    def create_knowledge_graph(self, max_content_items: Optional[int] = None, 
+                              source_filter: Optional[str] = None,
+                              use_temp_db: bool = True) -> Dict[str, Any]:
+        """Create a knowledge graph from the data in the database.
+        
+        Args:
+            max_content_items: Maximum number of content items to process
+            source_filter: Filter content by source
+            use_temp_db: Whether to use the temporary database
+            
+        Returns:
+            Results of the knowledge graph creation
+        """
+        start_time = time.time()
+        
+        try:
+            # Determine which database to use
+            db = self.temp_db if use_temp_db and self.temp_db else self.sqlite_db
+            logger.info(f"Using {'temporary' if use_temp_db and self.temp_db else 'main'} database for knowledge graph creation")
+            
+            # If we're using the temp DB but haven't transferred data yet, do it now
+            if use_temp_db and self.temp_db and self.temp_db != self.sqlite_db:
+                transfer_results = self.transfer_data_to_temp_db(max_content_items, source_filter)
+                logger.info(f"Transferred {transfer_results.get('content_count', 0)} content items and {transfer_results.get('entity_count', 0)} entities to temp DB")
+            
+            # Get content from the database
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get content to process
+                query = "SELECT id, title, summary, content FROM content"
+                params = []
+                
+                if source_filter:
+                    query += " WHERE source_id LIKE ?"
+                    params.append(f"%{source_filter}%")
+                
+                if max_content_items:
+                    query += f" LIMIT ?"
+                    params.append(max_content_items)
+                
+                cursor.execute(query, params)
+                content_items = cursor.fetchall()
+                
+                logger.info(f"Processing {len(content_items)} content items")
+                
+                # Process each content item
+                content_nodes = []
+                entity_nodes = {}  # Map of entity name to node ID
+                entity_types = set()
+                
+                for content_item in tqdm(content_items, desc="Processing content"):
+                    content_id, title, summary, content_text = content_item
+                    
+                    # Create content node in Neo4j
+                    try:
+                        content_node_id = self.neo4j_db.create_node(
+                            label="Content",
+                            properties={
+                                "id": content_id,
+                                "title": title or "",
+                                "summary": summary or "",
+                                "content": (content_text or "")[:1000]  # Limit content length
+                            }
+                        )
+                        content_nodes.append(content_node_id)
+                    except Exception as e:
+                        logger.error(f"Error creating content node for {content_id}: {e}", exc_info=True)
+                        continue
+                    
+                    # Get entities for this content
+                    cursor.execute(
+                        """
+                        SELECT e.id, e.name, e.entity_type
+                        FROM entities e
+                        JOIN entity_mentions em ON e.id = em.entity_id
+                        WHERE em.content_id = ?
+                        """,
+                        (content_id,)
+                    )
+                    
+                    entities = cursor.fetchall()
+                    
+                    # If no entities found, try to extract them
+                    if not entities:
+                        logger.info(f"No entities found for content {content_id}, extracting now...")
+                        
+                        # Combine title and summary for better extraction
+                        text_for_extraction = f"{title or ''}\n{summary or ''}\n{content_text or ''}"
+                        
+                        # Extract entities
+                        extracted_entities = self._extract_entities_from_text(text_for_extraction)
+                        
+                        # Store extracted entities
+                        for entity_type, entities_dict in extracted_entities.items():
+                            entity_types.add(entity_type)
+                            
+                            for entity_name, entity_data in entities_dict.items():
+                                # Skip empty entity names
+                                if not entity_name.strip():
+                                    continue
+                                    
+                                # Create entity in database
+                                entity_id = str(uuid.uuid4())
+                                
+                                try:
+                                    cursor.execute(
+                                        """
+                                        INSERT OR IGNORE INTO entities (id, name, entity_type, metadata)
+                                        VALUES (?, ?, ?, ?)
+                                        """,
+                                        (
+                                            entity_id,
+                                            entity_name,
+                                            entity_type,
+                                            json.dumps(entity_data)
+                                        )
+                                    )
+                                    
+                                    # Create entity mention
+                                    cursor.execute(
+                                        """
+                                        INSERT OR IGNORE INTO entity_mentions (id, entity_id, content_id, frequency)
+                                        VALUES (?, ?, ?, ?)
+                                        """,
+                                        (
+                                            str(uuid.uuid4()),
+                                            entity_id,
+                                            content_id,
+                                            entity_data.get("frequency", 1)
+                                        )
+                                    )
+                                    
+                                    # Add to entities list
+                                    entities.append((entity_id, entity_name, entity_type))
+                                except Exception as e:
+                                    logger.error(f"Error storing entity {entity_name}: {e}", exc_info=True)
+                    
+                    # Process entities
+                    content_entity_nodes = []
+                    
+                    for entity_id, entity_name, entity_type in entities:
                         entity_types.add(entity_type)
                         
-                        # Create or get entity node
-                        try:
-                            if entity_name not in entity_nodes:
-                                entity_node_id = self.neo4j_db.create_entity_node(
-                                    entity_type=entity_type,
-                                    name=entity_name,
+                        # Create entity node in Neo4j if it doesn't exist
+                        if entity_name not in entity_nodes:
+                            try:
+                                entity_node_id = self.neo4j_db.create_node(
+                                    label="Entity",
                                     properties={
-                                        "frequency": entity_data["count"],
-                                        "importance": entity_data["importance"]
+                                        "id": entity_id,
+                                        "name": entity_name,
+                                        "type": entity_type
                                     }
                                 )
                                 entity_nodes[entity_name] = entity_node_id
-                            else:
-                                entity_node_id = entity_nodes[entity_name]
-                            
-                            # Create relationship between content and entity
-                            self.neo4j_db.create_relationship(
-                                from_id=content_node_id,
-                                to_id=entity_node_id,
-                                rel_type="MENTIONS",
-                                properties={
-                                    "count": entity_data["count"],
-                                    "importance": entity_data["importance"]
-                                }
-                            )
-                            
-                            # Add to temporary graph for analysis
-                            if entity_name not in temp_graph:
-                                temp_graph.add_node(entity_name, type=entity_type)
-                            
-                            # Add edges between entities that co-occur
-                            for other_entity_type, other_entity_list in entities.items():
-                                for other_entity_name in other_entity_list:
-                                    if entity_name != other_entity_name:
-                                        if other_entity_name not in temp_graph:
-                                            temp_graph.add_node(other_entity_name, type=other_entity_type)
-                                        
-                                        if temp_graph.has_edge(entity_name, other_entity_name):
-                                            temp_graph[entity_name][other_entity_name]['weight'] += 1
-                                        else:
-                                            temp_graph.add_edge(entity_name, other_entity_name, weight=1)
-                        except Exception as e:
-                            logger.error(f"Error processing entity {entity_name}: {e}", exc_info=True)
-                            continue
-            
-            # Create similarity relationships between content
-            if cosine_sim is not None:
-                logger.info("Creating similarity relationships between content...")
-                similarity_threshold = 0.3
-                
-                for i in tqdm(range(len(all_content)), desc="Creating content similarity relationships"):
-                    for j in range(i+1, len(all_content)):
-                        if cosine_sim[i, j] > similarity_threshold:
-                            try:
-                                self.neo4j_db.create_relationship(
-                                    from_id=content_nodes[content_ids[i]],
-                                    to_id=content_nodes[content_ids[j]],
-                                    rel_type="SIMILAR_TO",
-                                    properties={
-                                        "similarity_score": float(cosine_sim[i, j])
-                                    }
-                                )
                             except Exception as e:
-                                logger.error(f"Error creating similarity relationship: {e}", exc_info=True)
+                                logger.error(f"Error creating entity node for {entity_name}: {e}", exc_info=True)
                                 continue
-            
-            # Create relationships between entities based on co-occurrence
-            logger.info("Creating relationships between entities...")
-            for edge in tqdm(temp_graph.edges(data=True), desc="Creating entity relationships"):
-                entity1, entity2, data = edge
-                
-                if entity1 in entity_nodes and entity2 in entity_nodes:
-                    weight = data['weight']
-                    
-                    if weight > 1:  # Only create relationships for entities that co-occur multiple times
+                        
+                        # Create relationship between content and entity
                         try:
                             self.neo4j_db.create_relationship(
-                                from_id=entity_nodes[entity1],
-                                to_id=entity_nodes[entity2],
-                                rel_type="RELATED_TO",
-                                properties={
-                                    "weight": weight,
-                                    "strength": min(1.0, weight / 10.0)  # Normalize strength
-                                }
+                                from_id=content_node_id,
+                                to_id=entity_nodes[entity_name],
+                                rel_type="MENTIONS",
+                                properties={}
                             )
+                            content_entity_nodes.append(entity_nodes[entity_name])
                         except Exception as e:
-                            logger.error(f"Error creating entity relationship: {e}", exc_info=True)
-                            continue
-            
-            # Try to create topic clusters
-            try:
-                logger.info("Creating topic clusters...")
-                self._create_topic_clusters(entity_nodes)
-            except Exception as e:
-                logger.error(f"Error creating topic clusters: {e}", exc_info=True)
+                            logger.error(f"Error creating MENTIONS relationship: {e}", exc_info=True)
+                    
+                    # Create relationships between entities that co-occur in this content
+                    for i in range(len(content_entity_nodes)):
+                        for j in range(i + 1, len(content_entity_nodes)):
+                            try:
+                                # Store relationship in temp DB
+                                if db == self.temp_db:
+                                    cursor.execute(
+                                        """
+                                        INSERT OR IGNORE INTO relationships (id, from_entity_id, to_entity_id, relationship_type, weight)
+                                        VALUES (?, ?, ?, ?, ?)
+                                        """,
+                                        (
+                                            str(uuid.uuid4()),
+                                            content_entity_nodes[i],
+                                            content_entity_nodes[j],
+                                            "CO_OCCURS",
+                                            1.0
+                                        )
+                                    )
+                                
+                                # Create relationship in Neo4j
+                                self.neo4j_db.create_relationship(
+                                    from_id=content_entity_nodes[i],
+                                    to_id=content_entity_nodes[j],
+                                    rel_type="CO_OCCURS",
+                                    properties={"weight": 1.0}
+                                )
+                            except Exception as e:
+                                logger.error(f"Error creating CO_OCCURS relationship: {e}", exc_info=True)
+                
+                # Commit changes
+                conn.commit()
+                
+                # Create topic clusters
+                try:
+                    self._create_topic_clusters(entity_nodes)
+                except Exception as e:
+                    logger.error(f"Error creating topic clusters: {e}", exc_info=True)
             
             end_time = time.time()
             
@@ -813,14 +833,13 @@ class KnowledgeGraphAgent(BaseAgent):
                 "entity_nodes": len(entity_nodes),
                 "entity_types": list(entity_types)
             }
+        
         except Exception as e:
             logger.error(f"Error creating knowledge graph: {e}", exc_info=True)
-            end_time = time.time()
             
             return {
                 "status": "error",
-                "error": str(e),
-                "execution_time": end_time - start_time
+                "error": str(e)
             }
     
     def _create_topic_clusters(self, entity_nodes: Dict[str, str]):
@@ -848,10 +867,10 @@ class KnowledgeGraphAgent(BaseAgent):
             for topic_name, topic_concepts in topics.items():
                 # Create topic node
                 try:
-                    topic_node_id = self.neo4j_db.create_entity_node(
-                        entity_type="Topic",
-                        name=topic_name,
+                    topic_node_id = self.neo4j_db.create_node(
+                        label="Topic",
                         properties={
+                            "name": topic_name,
                             "concept_count": len(topic_concepts)
                         }
                     )
@@ -905,8 +924,7 @@ class KnowledgeGraphAgent(BaseAgent):
         
         system_prompt = """
         You are a concept clustering system. Your task is to group concepts into coherent topics.
-        Return ONLY a JSON object where keys are topic names and values are arrays of concepts.
-        Example response: {{"Machine Learning": ["neural networks", "deep learning"], "NLP": ["text mining", "sentiment analysis"]}}
+        Return ONLY a JSON object with the structure specified in the prompt, with no additional text.
         """
         
         try:
@@ -960,3 +978,182 @@ class KnowledgeGraphAgent(BaseAgent):
             logger.error(f"Knowledge graph creation failed: {results.get('error', 'Unknown error')}")
         
         return results
+
+    def _extract_entities_from_text(self, text: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Extract entities from text.
+        
+        Args:
+            text: Text to extract entities from
+            
+        Returns:
+            Dictionary of entity types to dictionaries of entity names to entity data
+        """
+        if not text:
+            return {
+                "Person": {}, "Organization": {}, "Location": {},
+                "Concept": {}, "Technology": {}, "Paper": {}
+            }
+        
+        # Limit text length to avoid token limits
+        text = text[:10000]
+        
+        # Try LLM-based extraction first
+        if self.llm_client:
+            try:
+                prompt = f"""
+                Extract named entities from the following text. Identify people, organizations, locations, concepts, technologies, and research papers.
+                
+                Text:
+                {text}
+                
+                For each entity, provide:
+                1. The entity name
+                2. The entity type (Person, Organization, Location, Concept, Technology, Paper)
+                3. A brief description (2-3 words)
+                4. Estimated frequency in the text (1-5)
+                
+                Return the results as a JSON object with the following structure:
+                {{
+                    "Person": {{
+                        "Person Name": {{
+                            "description": "brief description",
+                            "frequency": number
+                        }}
+                    }},
+                    "Organization": {{ ... }},
+                    "Location": {{ ... }},
+                    "Concept": {{ ... }},
+                    "Technology": {{ ... }},
+                    "Paper": {{ ... }}
+                }}
+                
+                Only include entities that are clearly mentioned in the text. Do not invent entities.
+                """
+                
+                system_prompt = """
+                You are an entity extraction system. Your task is to identify named entities in text.
+                Return ONLY a JSON object with the structure specified in the prompt, with no additional text.
+                """
+                
+                response = self.llm_client.generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.1,
+                    max_tokens=2000
+                )
+                
+                # Extract JSON from response
+                response = response.strip()
+                if response.startswith("```json"):
+                    response = response[7:]
+                if response.endswith("```"):
+                    response = response[:-3]
+                
+                # Parse JSON
+                entities = json.loads(response)
+                
+                # Validate structure
+                valid_types = ["Person", "Organization", "Location", "Concept", "Technology", "Paper"]
+                
+                for entity_type in valid_types:
+                    if entity_type not in entities:
+                        entities[entity_type] = {}
+                    elif not isinstance(entities[entity_type], dict):
+                        entities[entity_type] = {}
+                
+                logger.info(f"LLM extraction found {sum(len(entities[t]) for t in valid_types)} entities")
+                return entities
+                
+            except Exception as e:
+                logger.error(f"Error in LLM-based entity extraction: {e}", exc_info=True)
+                # Fall back to spaCy
+        
+        # Fall back to spaCy if available
+        if self.has_spacy:
+            try:
+                entities = {
+                    "Person": {}, "Organization": {}, "Location": {},
+                    "Concept": {}, "Technology": {}, "Paper": {}
+                }
+                
+                doc = self.nlp(text)
+                
+                # Map spaCy entity types to our types
+                type_mapping = {
+                    "PERSON": "Person",
+                    "ORG": "Organization",
+                    "GPE": "Location",
+                    "LOC": "Location",
+                    "PRODUCT": "Technology",
+                    "WORK_OF_ART": "Paper"
+                }
+                
+                # Extract entities
+                for ent in doc.ents:
+                    entity_type = type_mapping.get(ent.label_, "Concept")
+                    entity_name = ent.text.strip()
+                    
+                    if not entity_name:
+                        continue
+                    
+                    if entity_name not in entities[entity_type]:
+                        entities[entity_type][entity_name] = {
+                            "description": f"{entity_type.lower()}",
+                            "frequency": 1
+                        }
+                    else:
+                        entities[entity_type][entity_name]["frequency"] += 1
+                
+                logger.info(f"spaCy extraction found {sum(len(entities[t]) for t in entities)} entities")
+                return entities
+                
+            except Exception as e:
+                logger.error(f"Error in spaCy-based entity extraction: {e}", exc_info=True)
+                # Fall back to regex
+        
+        # Last resort: regex-based extraction
+        try:
+            entities = {
+                "Person": {}, "Organization": {}, "Location": {},
+                "Concept": {}, "Technology": {}, "Paper": {}
+            }
+            
+            # Extract capitalized phrases as potential entities
+            capitalized_phrases = re.findall(r'\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b', text)
+            
+            for phrase in capitalized_phrases:
+                # Skip single letters and common words
+                if len(phrase) <= 1 or phrase.lower() in ['the', 'a', 'an', 'of', 'in', 'on', 'at', 'by', 'for']:
+                    continue
+                
+                # Determine entity type based on heuristics
+                if len(phrase.split()) >= 3 and any(word in phrase.lower() for word in ['study', 'research', 'paper', 'analysis']):
+                    entity_type = "Paper"
+                elif any(word in phrase.lower() for word in ['university', 'institute', 'corporation', 'inc', 'ltd', 'company']):
+                    entity_type = "Organization"
+                elif any(word in phrase.lower() for word in ['algorithm', 'system', 'framework', 'platform', 'language', 'model']):
+                    entity_type = "Technology"
+                elif len(phrase.split()) <= 2:
+                    entity_type = "Concept"
+                else:
+                    entity_type = "Concept"
+                
+                if phrase not in entities[entity_type]:
+                    entities[entity_type][phrase] = {
+                        "description": f"{entity_type.lower()}",
+                        "frequency": 1
+                    }
+                else:
+                    entities[entity_type][phrase]["frequency"] += 1
+            
+            logger.info(f"Regex extraction found {sum(len(entities[t]) for t in entities)} entities")
+            return entities
+            
+        except Exception as e:
+            logger.error(f"Error in regex-based entity extraction: {e}", exc_info=True)
+            
+            # Return empty result if all methods fail
+            return {
+                "Person": {}, "Organization": {}, "Location": {},
+                "Concept": {}, "Technology": {}, "Paper": {}
+            }
