@@ -24,6 +24,10 @@ import ResearchInterface from './ResearchInterface';
 import * as Showdown from 'showdown';
 import html2canvas from 'html2canvas';
 import { useTransition } from 'react';
+// @ts-ignore
+import remarkGfm from 'remark-gfm';
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
 
 interface ChatMainProps {
   username: string;
@@ -739,112 +743,306 @@ const ChatMain: React.FC<ChatMainProps> = ({
 
   // Function to download only the markdown response as PDF
   const downloadMarkdownAsPDF = (markdownContent: string) => {
-    // Create a temporary div to render the HTML
-    const tempDiv = document.createElement('div');
-    tempDiv.style.padding = '20px';
-    tempDiv.style.position = 'absolute';
-    tempDiv.style.top = '-9999px';
-    tempDiv.style.left = '-9999px';
-    tempDiv.style.width = '750px'; // Fixed width for better layout control
-    
-    // Apply some basic styles for the PDF
-    tempDiv.style.fontFamily = 'Arial, Helvetica, sans-serif';
-    tempDiv.style.fontSize = '12px';
-    tempDiv.style.lineHeight = '1.6';
-    tempDiv.style.color = '#333';
-    
-    // Add styling for markdown elements
-    const styleElement = document.createElement('style');
-    styleElement.textContent = `
-      h1 { font-size: 24px; margin-top: 20px; margin-bottom: 10px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-      h2 { font-size: 20px; margin-top: 18px; margin-bottom: 8px; }
-      h3 { font-size: 16px; margin-top: 16px; margin-bottom: 8px; }
-      p { margin-bottom: 10px; }
-      code { background-color: #f5f5f5; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
-      pre { background-color: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; margin-bottom: 15px; }
-      blockquote { border-left: 4px solid #ddd; padding-left: 15px; margin-left: 0; color: #666; }
-      ul, ol { margin-bottom: 15px; margin-left: 20px; }
-      li { margin-bottom: 5px; }
-      table { border-collapse: collapse; width: 100%; margin-bottom: 15px; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-      th { background-color: #f5f5f5; }
-      hr { border: 0; height: 1px; background-color: #ddd; margin: 20px 0; }
-      img { max-width: 100%; height: auto; }
-    `;
-    document.head.appendChild(styleElement);
-    
-    // Convert markdown to HTML
-    const converter = new Showdown.Converter({
-      tables: true, 
-      simplifiedAutoLink: true,
-      strikethrough: true,
-      tasklists: true,
-      smartIndentationFix: true,
-      openLinksInNewWindow: true,
-      emoji: true
-    });
-    
-    // Add a title and proper header
-    const htmlContent = `
-      <div style="padding: 40px 50px;">
-        <div style="display: flex; align-items: center; margin-bottom: 30px;">
-          <div style="width: 8px; height: 36px; background: linear-gradient(to bottom, #4338ca, #6366f1); border-radius: 4px; margin-right: 15px;"></div>
-          <h1 style="color: #1f2937; margin: 0; font-size: 28px; font-weight: 600;">Research Results</h1>
-        </div>
-        <div style="border-bottom: 1px solid #e5e7eb; margin-bottom: 30px;"></div>
-        ${converter.makeHtml(markdownContent)}
-      </div>
-    `;
-    
-    tempDiv.innerHTML = htmlContent;
-    document.body.appendChild(tempDiv);
-    
-    // Use html2canvas to convert the HTML to an image
-    html2canvas(tempDiv, {
-      scale: 2, // Higher scale for better quality
-      useCORS: true,
-      logging: false,
-      allowTaint: true
-    }).then(canvas => {
-      // Clean up
-      document.body.removeChild(tempDiv);
-      document.head.removeChild(styleElement);
+    try {
+      console.log("Starting PDF generation using html2pdf.js");
       
-      // Create PDF with proper dimensions and margins
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'mm',
-        format: 'a4',
-        compress: true
+      // Create a temporary container for the PDF content
+      const tempDiv = document.createElement('div');
+      tempDiv.id = 'preview';
+      
+      // Apply base styles for single-column layout
+      tempDiv.style.fontFamily = 'Times, "Times New Roman", serif';
+      tempDiv.style.fontSize = '10pt';
+      tempDiv.style.lineHeight = '1.2';
+      tempDiv.style.width = 'auto';
+      tempDiv.style.boxSizing = 'border-box';
+      
+      // Create markdown renderer
+      const converter = new Showdown.Converter({
+        tables: true,
+        simplifiedAutoLink: true,
+        strikethrough: true,
+        tasklists: true
       });
       
-      // Calculate dimensions with margins
-      const pdfWidth = 210; // A4 width in mm (portrait)
-      const pdfHeight = 297; // A4 height in mm
+      // Convert markdown to HTML
+      tempDiv.innerHTML = converter.makeHtml(markdownContent);
       
-      // Add margins
-      const margin = 20; // 20mm margins
-      const contentWidth = pdfWidth - (margin * 2);
-      const contentHeight = (canvas.height * contentWidth) / canvas.width;
+      // Process title section
+      const titleSection = document.createElement('div');
+      titleSection.className = 'title-section';
       
-      // First page
-      pdf.addImage(imgData, 'PNG', margin, margin, contentWidth, contentHeight);
-      
-      // Calculate if we need more pages
-      let remainingHeight = contentHeight - (pdfHeight - (margin * 2));
-      let currentPosition = margin - remainingHeight;
-      
-      // Add additional pages if needed
-      while (remainingHeight > 0) {
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', margin, currentPosition, contentWidth, contentHeight);
-        remainingHeight -= (pdfHeight - (margin * 2));
-        currentPosition -= (pdfHeight - (margin * 2));
+      // Extract title (h1) if present
+      const h1 = tempDiv.querySelector('h1');
+      if (h1) {
+        titleSection.appendChild(h1);
+        
+        // Check for author paragraph (first p after h1)
+        let sibling = h1.nextSibling;
+        if (sibling && (sibling as HTMLElement).tagName === 'P') {
+          const authorsP = document.createElement('p');
+          authorsP.className = 'authors';
+          authorsP.innerHTML = (sibling as HTMLElement).innerHTML;
+          titleSection.appendChild(authorsP);
+          tempDiv.removeChild(sibling);
+          sibling = h1.nextSibling;
+        }
+        
+        // Check for affiliation paragraph (second p after h1)
+        if (sibling && (sibling as HTMLElement).tagName === 'P') {
+          const affP = document.createElement('p');
+          affP.className = 'affiliations';
+          affP.innerHTML = (sibling as HTMLElement).innerHTML;
+          titleSection.appendChild(affP);
+          tempDiv.removeChild(sibling);
+        }
+        
+        // Insert title section at the beginning
+        tempDiv.insertBefore(titleSection, tempDiv.firstChild);
+      } else {
+        // If no h1 is found, create a default title using current date
+        const defaultTitle = document.createElement('h1');
+        defaultTitle.textContent = "Research Results";
+        
+        const today = new Date();
+        const formattedDate = today.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+        
+        const dateP = document.createElement('p');
+        dateP.className = 'authors';
+        dateP.textContent = formattedDate;
+        
+        titleSection.appendChild(defaultTitle);
+        titleSection.appendChild(dateP);
+        
+        tempDiv.insertBefore(titleSection, tempDiv.firstChild);
       }
       
-      // Save the PDF
-      pdf.save('research-report.pdf');
+      // Process sections: abstract, keywords, references
+      wrapSection(tempDiv, 'abstract', 'abstract-section', 'abstract-text');
+      wrapSection(tempDiv, 'keywords', 'keywords-section', 'keywords-text');
+      wrapSection(tempDiv, 'references', 'references-section', null, true);
+      
+      // Add section-title class to other H2 headings
+      tempDiv.querySelectorAll('h2').forEach(h2 => {
+        if (!h2.parentElement?.classList.contains('abstract-section') &&
+            !h2.parentElement?.classList.contains('keywords-section') &&
+            !h2.parentElement?.classList.contains('references-section')) {
+          h2.classList.add('section-title');
+        }
+      });
+      
+      // Add styles for document formatting
+      const styleElement = document.createElement('style');
+      styleElement.textContent = `
+        /* A4 page settings */
+        @page { size: A4; margin: 2cm 1.5cm; }
+        
+        /* Main container: single-column layout */
+        #preview {
+          font-family: Times, "Times New Roman", serif;
+          font-size: 10pt;
+          line-height: 1.2;
+          width: auto;
+          box-sizing: border-box;
+          color: #000000;
+        }
+        
+        /* Title, authors and affiliations */
+        .title-section,
+        .abstract-section,
+        .keywords-section,
+        .references-section {
+          margin-bottom: 1em;
+          color: #000000;
+        }
+        
+        .title-section h1 {
+          font-size: 14pt;
+          font-weight: bold;
+          text-align: center;
+          margin-bottom: 0.2em;
+          color: #000000;
+        }
+        .title-section .authors {
+          font-size: 10pt;
+          text-align: center;
+          margin: 0;
+          color: #000000;
+        }
+        .title-section .affiliations {
+          font-size: 9pt;
+          text-align: center;
+          margin: 0.2em 0;
+          color: #000000;
+        }
+        
+        /* Section headings */
+        .section-title {
+          font-size: 12pt;
+          font-weight: bold;
+          margin-top: 1em;
+          margin-bottom: 0.3em;
+          color: #000000;
+        }
+        
+        /* Abstract formatting */
+        .abstract-section h2 { margin: 0; font-size: 12pt; font-weight: bold; color: #000000; }
+        .abstract-section .abstract-text { font-style: italic; margin-top: 0.5em; color: #000000; }
+        
+        /* Keywords formatting */
+        .keywords-section h2 { margin: 0; font-size: 12pt; font-weight: bold; color: #000000; }
+        .keywords-section .keywords-text { margin-top: 0.3em; color: #000000; }
+        
+        /* References formatting */
+        .references-section h2 { margin: 0; font-size: 12pt; font-weight: bold; color: #000000; }
+        .references-section ol { padding-left: 1.2em; margin-top: 0.5em; color: #000000; }
+        .references-section li { margin-bottom: 0.3em; color: #000000; }
+        
+        /* General text formatting */
+        p { margin-bottom: 0.6em; color: #000000; }
+        
+        /* Lists */
+        ul, ol { padding-left: 1.2em; margin-top: 0.5em; margin-bottom: 0.5em; color: #000000; }
+        li { margin-bottom: 0.3em; color: #000000; }
+        
+        /* Tables */
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 1em 0;
+          break-inside: avoid;
+          page-break-inside: avoid;
+          color: #000000;
+        }
+        
+        th, td {
+          border: 1px solid #000000;
+          padding: 0.4em;
+          text-align: left;
+          color: #000000;
+        }
+        
+        th {
+          background-color: #f5f5f5;
+          font-weight: bold;
+          color: #000000;
+        }
+        
+        /* Code blocks */
+        pre {
+          background-color: #f8f8f8;
+          border: 1px solid #eeeeee;
+          border-radius: 3px;
+          padding: 0.5em;
+          margin: 0.7em 0;
+          font-family: "Courier New", monospace;
+          font-size: 9pt;
+          white-space: pre-wrap;
+          break-inside: avoid;
+          page-break-inside: avoid;
+          color: #000000;
+        }
+        
+        code {
+          font-family: "Courier New", monospace;
+          font-size: 9pt;
+          background-color: #f5f5f5;
+          padding: 0.1em 0.3em;
+          border-radius: 3px;
+          color: #000000;
+        }
+        
+        /* Prevent breaks inside figures/images */
+        img {
+          max-width: 100%;
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        
+        /* Blockquotes */
+        blockquote {
+          margin: 0.7em 0;
+          padding-left: 1em;
+          border-left: 3px solid #000000;
+          color: #000000;
+          font-style: italic;
+        }
+        
+        /* Force all text to be black */
+        * {
+          color: #000000 !important;
+        }
+      `;
+      
+      // Add the style element to the tempDiv
+      tempDiv.appendChild(styleElement);
+      
+      // Add the temporary container to the document body
+      document.body.appendChild(tempDiv);
+      
+      // Configure html2pdf options for A4 paper
+      const opt = {
+        margin: [20, 15, 20, 15], // [top, right, bottom, left] in mm
+        filename: `research-report-${new Date().toISOString().slice(0, 10)}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
+      };
+      
+      // Generate and save the PDF
+      html2pdf()
+        .set(opt)
+        .from(tempDiv)
+        .save()
+        .then(() => {
+          // Clean up
+          document.body.removeChild(tempDiv);
+          console.log("PDF successfully generated");
+        })
+        .catch((error: unknown) => {
+          console.error("Error generating PDF:", error);
+          if (document.body.contains(tempDiv)) {
+            document.body.removeChild(tempDiv);
+          }
+          alert("There was an error generating the PDF. Please try again.");
+        });
+    } catch (error) {
+      console.error("Error initializing PDF generation:", error);
+      alert("There was an error generating the PDF. Please try again.");
+    }
+  };
+
+  // Helper function to wrap sections (abstract, keywords, references)
+  const wrapSection = (
+    root: HTMLElement, 
+    name: string, 
+    containerClass: string, 
+    textClass: string | null, 
+    isList: boolean = false
+  ) => {
+    Array.from(root.children).forEach(node => {
+      if (node.tagName === 'H2' && node.textContent?.trim().toLowerCase() === name) {
+        const div = document.createElement('div');
+        div.className = containerClass;
+        root.insertBefore(div, node);
+        div.appendChild(node);
+        
+        let sib = div.nextSibling;
+        while (sib && (sib as HTMLElement).tagName !== 'H2') {
+          if (isList || textClass) {
+            if (textClass && (sib as HTMLElement).tagName === 'P') {
+              (sib as HTMLElement).classList.add(textClass);
+            }
+          }
+          div.appendChild(sib);
+          sib = div.nextSibling;
+        }
+      }
     });
   };
 
@@ -1114,7 +1312,13 @@ const ChatMain: React.FC<ChatMainProps> = ({
                   )}
                 </h3>
                 <button 
-                  onClick={() => downloadMarkdownAsPDF(assistantResponse.content)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!isPlaceholderMessage(assistantResponse.content)) {
+                      downloadMarkdownAsPDF(assistantResponse.content);
+                    }
+                  }}
                   className={`px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-colors ${
                     isPlaceholderMessage(assistantResponse.content) 
                       ? 'bg-gray-600 cursor-not-allowed' 
@@ -1137,7 +1341,48 @@ const ChatMain: React.FC<ChatMainProps> = ({
                   </div>
                 ) : (
                   <div className="prose prose-invert max-w-none">
-                    <ReactMarkdown>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        code({node, inline, className, children, ...props}: any) {
+                          const match = /language-(\w+)/.exec(className || '');
+                          return !inline && match ? (
+                            <pre className="rounded-md">
+                              <code className={className} {...props}>
+                                {children}
+                              </code>
+                            </pre>
+                          ) : (
+                            <code className={className} {...props}>
+                              {children}
+                            </code>
+                          );
+                        },
+                        table({children, ...props}: any) {
+                          return (
+                            <div className="overflow-x-auto my-4">
+                              <table className="border-collapse border border-gray-700/50 w-full" {...props}>
+                                {children}
+                              </table>
+                            </div>
+                          );
+                        },
+                        th({children, ...props}: any) {
+                          return (
+                            <th className="border border-gray-700/50 bg-gray-800/50 px-4 py-2 text-left" {...props}>
+                              {children}
+                            </th>
+                          );
+                        },
+                        td({children, ...props}: any) {
+                          return (
+                            <td className="border border-gray-700/50 px-4 py-2" {...props}>
+                              {children}
+                            </td>
+                          );
+                        }
+                      }}
+                    >
                       {assistantResponse.content}
                     </ReactMarkdown>
                   </div>
@@ -1192,7 +1437,48 @@ const ChatMain: React.FC<ChatMainProps> = ({
                       </div>
                     ) : message.role === 'assistant' ? (
                       <div className="prose prose-invert max-w-none">
-                        <ReactMarkdown>
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            code({node, inline, className, children, ...props}: any) {
+                              const match = /language-(\w+)/.exec(className || '');
+                              return !inline && match ? (
+                                <pre className="rounded-md">
+                                  <code className={className} {...props}>
+                                    {children}
+                                  </code>
+                                </pre>
+                              ) : (
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
+                              );
+                            },
+                            table({children, ...props}: any) {
+                              return (
+                                <div className="overflow-x-auto my-4">
+                                  <table className="border-collapse border border-gray-700/50 w-full" {...props}>
+                                    {children}
+                                  </table>
+                                </div>
+                              );
+                            },
+                            th({children, ...props}: any) {
+                              return (
+                                <th className="border border-gray-700/50 bg-gray-800/50 px-4 py-2 text-left" {...props}>
+                                  {children}
+                                </th>
+                              );
+                            },
+                            td({children, ...props}: any) {
+                              return (
+                                <td className="border border-gray-700/50 px-4 py-2" {...props}>
+                                  {children}
+                                </td>
+                              );
+                            }
+                          }}
+                        >
                           {message.content}
                         </ReactMarkdown>
                       </div>
@@ -1209,7 +1495,9 @@ const ChatMain: React.FC<ChatMainProps> = ({
           {messages.length > 0 && (
             <div className="mt-2 mb-4 flex justify-end">
               <button 
-                onClick={() => {
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                   // Find the latest assistant message
                   const latestAssistantMessage = [...messages]
                     .reverse()

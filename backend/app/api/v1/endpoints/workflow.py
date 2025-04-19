@@ -31,7 +31,8 @@ except ImportError:
 import gc
 import re
 
-llm = ChatGroq(api_key="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", model="llama-3.3-70b-versatile")
+llm = ChatGroq(api_key="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", model="llama-3.3-70b-versatile")
+# llm = ChatGroq(api_key="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", model="llama-3.3-70b-versatile")
 
 # Setup vector database - Make embeddings optional
 USE_EMBEDDINGS = False  # Set to False for much faster processing without embeddings

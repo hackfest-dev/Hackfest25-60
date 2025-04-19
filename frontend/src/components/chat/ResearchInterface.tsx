@@ -12,7 +12,11 @@ import {
   IconRocket,
   IconPencil,
   IconCheck,
-  IconX
+  IconX,
+  IconDatabase,
+  IconFileText,
+  IconNews,
+  IconSchool
 } from '@tabler/icons-react';
 import anime from 'animejs';
 
@@ -23,7 +27,35 @@ interface ResearchInterfaceProps {
   currentStage: string;
   onNewChat?: () => void;
   onComplete?: () => void;
+  backendData?: any;
 }
+
+// Sample research sources by category for demo
+const SAMPLE_SOURCES = {
+  academic: [
+    { title: "The Evolution of Deep Learning", source: "journal.ai-research.org", icon: <IconSchool size={16} />, relevance: 98 },
+    { title: "Multimodal Learning: A Survey", source: "academic-journals.org", icon: <IconBooks size={16} />, relevance: 94 },
+    { title: "Comparative Analysis of ML Algorithms", source: "ieee-explore.org", icon: <IconSchool size={16} />, relevance: 92 },
+    { title: "Neural Networks in Practice", source: "research-gate.net", icon: <IconSchool size={16} />, relevance: 90 },
+    { title: "Statistical Methods in AI", source: "statistics-journal.edu", icon: <IconBooks size={16} />, relevance: 87 }
+  ],
+  news: [
+    { title: "Latest Breakthroughs in AI", source: "tech-today.com", icon: <IconNews size={16} />, relevance: 89 },
+    { title: "Industry Adopts New ML Techniques", source: "ai-industry-news.com", icon: <IconNews size={16} />, relevance: 82 },
+    { title: "Start-ups Leveraging AI for Growth", source: "startup-mag.com", icon: <IconNews size={16} />, relevance: 78 },
+    { title: "AI Conference Highlights", source: "tech-events-daily.com", icon: <IconNews size={16} />, relevance: 76 }
+  ],
+  expert: [
+    { title: "Expert Opinion: Future of AI", source: "expert-insights.net", icon: <IconBrain size={16} />, relevance: 93 },
+    { title: "Interview with Leading Researcher", source: "ai-talks.com", icon: <IconBrain size={16} />, relevance: 89 },
+    { title: "AI Ethics Perspective", source: "ethics-in-tech.org", icon: <IconBrain size={16} />, relevance: 84 }
+  ],
+  insights: [
+    { title: "Market Analysis of AI Trends", source: "market-intelligence.com", icon: <IconDatabase size={16} />, relevance: 86 },
+    { title: "Key Insights from Multiple Sources", source: "data-synthesis.com", icon: <IconFileText size={16} />, relevance: 82 },
+    { title: "Practical Applications Survey", source: "implementation-review.org", icon: <IconDatabase size={16} />, relevance: 79 }
+  ]
+};
 
 // Animated progress bar with 3D effect
 const ProgressBar: React.FC<{ progress: number }> = ({ progress }) => {
@@ -168,45 +200,90 @@ const SourceItem: React.FC<{
   );
 };
 
+// Stages of research for better visualization of progress
+const RESEARCH_STAGES = [
+  { threshold: 0, name: "Initializing...", detail: "Setting up research parameters" },
+  { threshold: 5, name: "Data Collection", detail: "Gathering relevant sources" },
+  { threshold: 25, name: "Indexing", detail: "Cataloging research materials" },
+  { threshold: 40, name: "Analysis", detail: "Processing research data" },
+  { threshold: 60, name: "Contextualizing", detail: "Establishing connections between sources" },
+  { threshold: 75, name: "Synthesizing", detail: "Combining insights from multiple sources" },
+  { threshold: 90, name: "Finalizing", detail: "Preparing research results" },
+  { threshold: 98, name: "Completion", detail: "Research complete" }
+];
+
 const ResearchInterface: React.FC<ResearchInterfaceProps> = ({ 
   searchQuery, 
   sourceCount, 
   progress, 
   currentStage,
-  onComplete
+  onComplete,
+  backendData
 }) => {
+  const [activeCategory, setActiveCategory] = useState('academic');
   const [sourcesDiscovered, setSourcesDiscovered] = useState({
     academic: 0,
     news: 0,
     expert: 0,
     insights: 0
   });
+  const [visibleSources, setVisibleSources] = useState(SAMPLE_SOURCES.academic.slice(0, 4));
+  const [currentResearchStage, setCurrentResearchStage] = useState(RESEARCH_STAGES[0]);
   
   const containerRef = useRef<HTMLDivElement>(null);
   
-  // Generate random source counts based on progress
+  // Get current stage based on progress
+  useEffect(() => {
+    for (let i = RESEARCH_STAGES.length - 1; i >= 0; i--) {
+      if (progress >= RESEARCH_STAGES[i].threshold) {
+        setCurrentResearchStage(RESEARCH_STAGES[i]);
+        break;
+      }
+    }
+  }, [progress]);
+
+  // Generate realistic source counts based on progress
   useEffect(() => {
     const interval = setInterval(() => {
       if (progress < 100) {
+        // More realistic progression of sources being discovered
+        const academicMax = 28;
+        const newsMax = 12;
+        const expertMax = 8;
+        const insightsMax = 6;
+        
+        // Calculate progressive increase based on current progress percentage
+        const progressFactor = progress / 100;
+        const randomVariance = () => (Math.random() * 0.1) - 0.05; // Small random variance
+        
         setSourcesDiscovered({
-          academic: Math.min(Math.floor(Math.random() * 5) + Math.floor(progress / 5), 28),
-          news: Math.min(Math.floor(Math.random() * 3) + Math.floor(progress / 7), 12),
-          expert: Math.min(Math.floor(Math.random() * 2) + Math.floor(progress / 10), 8),
-          insights: Math.min(Math.floor(Math.random() * 2) + Math.floor(progress / 15), 6)
+          academic: Math.min(Math.floor((progressFactor * academicMax) * (1 + randomVariance())), academicMax),
+          news: Math.min(Math.floor((progressFactor * newsMax) * (1 + randomVariance())), newsMax),
+          expert: Math.min(Math.floor((progressFactor * expertMax) * (1 + randomVariance())), expertMax),
+          insights: Math.min(Math.floor((progressFactor * insightsMax) * (1 + randomVariance())), insightsMax)
         });
+        
+        // Update visible sources based on active category and progress
+        // Show more relevant sources as research progresses
+        if (progress > 30) {
+          setVisibleSources(
+            SAMPLE_SOURCES[activeCategory as keyof typeof SAMPLE_SOURCES]
+              .slice(0, Math.min(4, Math.floor(progress / 25) + 1))
+          );
+        }
       }
     }, 2000);
     
     return () => clearInterval(interval);
-  }, [progress, onComplete]);
+  }, [progress, activeCategory, onComplete]);
   
-  // Sample sources for demonstration
-  const sampleSources = [
-    { title: "Advanced Research Methods", source: "academic-journals.org", icon: <IconBooks size={16} />, relevance: 95 },
-    { title: "Recent Developments in AI", source: "tech-insights.com", icon: <IconWorld size={16} />, relevance: 88 },
-    { title: "Expert Analysis on Subject", source: "expert-opinions.net", icon: <IconBrain size={16} />, relevance: 76 },
-    { title: "Latest Industry Trends", source: "industry-today.com", icon: <IconClock size={16} />, relevance: 65 }
-  ];
+  // Handle category change
+  const handleCategoryChange = (category: string) => {
+    setActiveCategory(category);
+    setVisibleSources(
+      SAMPLE_SOURCES[category as keyof typeof SAMPLE_SOURCES].slice(0, 4)
+    );
+  };
 
   // Animations
   useEffect(() => {
@@ -347,7 +424,7 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
             <div className="text-sm text-gray-300 font-medium mb-1">Processing {sourceCount} sources</div>
             <div className="text-xs text-gray-400 flex items-center">
               <IconLoader2 size={12} className="text-indigo-400 mr-1.5 animate-spin" />
-              <span>{currentStage}</span>
+              <span>{currentResearchStage.name}: {currentResearchStage.detail}</span>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -379,29 +456,36 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
           icon={<IconBooks size={20} className="text-white" />} 
           title="Academic"
           count={sourcesDiscovered.academic}
-          isActive={true}
+          isActive={activeCategory === 'academic'}
           isComplete={progress >= 60}
+          onClick={() => handleCategoryChange('academic')}
         />
         
         <ResearchCategory 
           icon={<IconWorld size={20} className="text-white" />} 
           title="News"
           count={sourcesDiscovered.news}
+          isActive={activeCategory === 'news'}
           isComplete={progress >= 75}
+          onClick={() => handleCategoryChange('news')}
         />
         
         <ResearchCategory 
           icon={<IconBrain size={20} className="text-white" />} 
           title="Experts"
           count={sourcesDiscovered.expert}
+          isActive={activeCategory === 'expert'}
           isComplete={progress >= 90}
+          onClick={() => handleCategoryChange('expert')}
         />
         
         <ResearchCategory 
           icon={<IconBolt size={20} className="text-white" />} 
           title="Insights"
           count={sourcesDiscovered.insights}
+          isActive={activeCategory === 'insights'}
           isComplete={progress >= 95}
+          onClick={() => handleCategoryChange('insights')}
         />
       </div>
       
@@ -409,20 +493,22 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
       <div className="sources-header flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-gray-300 flex items-center">
           <span className="relative">
-            Top Sources
+            {activeCategory === 'academic' ? 'Academic Sources' : 
+             activeCategory === 'news' ? 'News Sources' :
+             activeCategory === 'expert' ? 'Expert Sources' : 'Key Insights'}
             <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-indigo-500 animate-ping"></span>
           </span>
         </h3>
         <div className="text-xs text-indigo-400 flex items-center gap-1 hover:text-white transition-colors cursor-pointer">
-          <span>View all</span>
+          <span>View all {sourcesDiscovered[activeCategory as keyof typeof sourcesDiscovered]}</span>
           <IconArrowRight size={12} />
         </div>
       </div>
       
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
-        {sampleSources.map((source, index) => (
+        {visibleSources.map((source, index) => (
           <SourceItem 
-            key={index}
+            key={`${activeCategory}-${index}`}
             title={source.title}
             source={source.source}
             icon={source.icon}
