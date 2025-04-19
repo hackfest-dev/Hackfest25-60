@@ -34,10 +34,11 @@ Searchify automates this entire process, allowing researchers, students, and pro
 - **LiteRAG Technology**: Generates focused answers to research questions with context awareness
 - **Professional Document Generation**: Creates LaTeX-based research papers with proper formatting
 - **User-Friendly Interface**: Simple UI for submitting research queries and viewing results
+- **Podcast Generation**: Convert research papers and documents into audio podcasts
 
 ## 💻 Technical Architecture
 
-The system is built with a modern stack divided into three main components:
+The system is built with a modern stack divided into four main components:
 
 ### Frontend
 - NextJs with TypeScript
@@ -50,9 +51,18 @@ The system is built with a modern stack divided into three main components:
 - Alembic for database migrations
 
 ### AI Research Engine
-- Custom multi-agent system with specialized roles (Data Miner, Knowledge Graph, LiteRAG, Writer)
-- Streamlit interface for direct interaction with the research pipeline
-- Support for multiple LLM providers (OpenAI, Groq, Anthropic, OpenRouter)
+- Crew AI Framework with specialized agent roles:
+  - DataMinerAgent: Scrapes 300-400 relevant sources using search APIs
+  - Knowledge Graph Creation: Successfully implemented and tested (see AI_researcher directory), currently toggled off by default for faster response times while preserving the option for deep semantic analysis
+  - LiteRAGAgent: Intelligently answers user queries using optimized vector search for speed
+  - ValidatorAgent: Reviews outputs for accuracy
+  - WriterAgent: Generates LaTeX reports
+- Support for multiple LLM providers (OpenAI, Groq, Anthropic, OpenRouter, Ollama)
+
+### Podcast Lab
+- PDF-to-Podcast conversion pipeline
+- Text-to-speech technology for generating high-quality audio content
+- Processing tools to transform research papers into engaging audio formats
 
 ## 🏁 Getting Started
 
@@ -60,6 +70,7 @@ Detailed setup instructions can be found in the respective directories:
 - [Frontend Setup](./frontend/README.md)
 - [Backend Setup](./backend/README.md)
 - [AI Researcher Setup](./AI_researcher/README.md)
+- [Podcast Lab](./Podcast_lab/pdf_podcast.ipynb)
 
 ## 👥 Creators
 
