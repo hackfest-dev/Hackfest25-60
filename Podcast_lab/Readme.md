@@ -1,9 +1,5 @@
 # Podcast Lab: Convert Research Papers to Audio
 
-<div align="center">
-  <img src="https://img.shields.io/badge/status-active-success.svg" alt="Status">
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
-</div>
 
 <p align="center">
   A specialized module that transforms PDF research papers into engaging audio podcasts, enabling knowledge consumption on the go.
