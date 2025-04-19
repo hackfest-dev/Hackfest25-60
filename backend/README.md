@@ -9,7 +9,6 @@ Backend API for Searchify.AI - An AI-powered research assistant.
 - Secure password handling with bcrypt
 - JWT token-based authentication
 - Database migrations with Alembic
-- PostgreSQL database support
 
 ## Tech Stack
 
@@ -25,7 +24,6 @@ Backend API for Searchify.AI - An AI-powered research assistant.
 ### Prerequisites
 
 - Python 3.8+
-- PostgreSQL
 
 ### Installation
 
@@ -56,9 +54,6 @@ Create a `.env` file based on `.env.example` and fill in your database credentia
 ```
 # Environment
 ENVIRONMENT=development
-
-# Database connection
-DATABASE_URL=postgresql://username:password@localhost:5432/searchify
 
 # Security
 SECRET_KEY=your-secret-key-here
