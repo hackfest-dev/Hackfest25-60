@@ -1,12 +1,14 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
+import logging
 
 from app.core.auth import get_current_active_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.chat import Chat, ChatCreate, ChatUpdate, Message, MessageCreate, ChatWithMessages
 from app.services import chat as chat_service
+from .workflow import ResearchWorkflow
 
 router = APIRouter()
 
@@ -101,10 +103,39 @@ def delete_chat(
     return None
 
 
+# Add a function to handle background processing
+async def process_research_workflow(chat_id: int, user_message: str, response_id: int, user_id: int):
+    """Process the research workflow in the background."""
+    # Get a new DB session for this background task
+    db = next(get_db())
+    try:
+        logging.info(f"Starting research workflow for message: {user_message[:50]}...")
+        workflow = ResearchWorkflow(topic=user_message)
+        result = workflow.run_full_workflow()
+        
+        # Update the existing message with the result
+        db_message = chat_service.get_message_by_id(db, response_id)
+        if db_message:
+            db_message.content = result
+            db.commit()
+            logging.info(f"Research workflow completed and message updated for ID: {response_id}")
+        else:
+            logging.error(f"Message not found with ID: {response_id}")
+    except Exception as e:
+        logging.error(f"Error in background task: {str(e)}")
+        # Update with error message
+        db_message = chat_service.get_message_by_id(db, response_id)
+        if db_message:
+            db_message.content = "Sorry, there was an error processing your request. Please try again later."
+            db.commit()
+    finally:
+        db.close()
+
 @router.post("/{chat_id}/messages", response_model=List[Message])
 def add_message(
     chat_id: int,
     message: MessageCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -119,20 +150,33 @@ def add_message(
     if db_message is None:
         raise HTTPException(status_code=500, detail="Failed to add message")
     
-    # For now, just echo back the same message if it's from the user
     response_messages = [db_message]
+    
     if message.role == "user":
-        # Create an assistant response that echoes back the user's message
-        # Format the response as markdown
-        markdown_content = message.content
-        assistant_message = MessageCreate(
-            role="assistant", 
-            content=markdown_content.strip()
+        # Create an initial response message
+        initial_response = MessageCreate(
+            role="assistant",
+            content="I'm researching your query. This may take a few moments... You'll see the results here when ready."
         )
         
-        db_assistant_message = chat_service.add_message(db=db, chat_id=chat_id, message=assistant_message)
-        if db_assistant_message:
-            response_messages.append(db_assistant_message)
+        # Add the initial response to the database
+        db_initial_response = chat_service.add_message(
+            db=db, chat_id=chat_id, message=initial_response
+        )
+        
+        if db_initial_response:
+            response_messages.append(db_initial_response)
+            
+            # Add the research task to background tasks
+            background_tasks.add_task(
+                process_research_workflow,
+                chat_id=chat_id,
+                user_message=message.content,
+                response_id=db_initial_response.id,
+                user_id=current_user.id
+            )
+        else:
+            logging.error("Failed to create initial response message")
     
     return response_messages
 

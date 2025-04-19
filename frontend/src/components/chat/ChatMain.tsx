@@ -259,6 +259,9 @@ const ChatMain: React.FC<ChatMainProps> = ({
   const isInitialLoadComplete = useRef(false);
   const [assistantResponse, setAssistantResponse] = useState<Message | null>(null);
 
+  // Add a ref to store active polling intervals
+  const activePollingIntervals = useRef<number[]>([]);
+
   // Modify the loadChat function to use cached data when available
   const loadChat = async (chatId: number) => {
     try {
@@ -545,6 +548,15 @@ const ChatMain: React.FC<ChatMainProps> = ({
       const apiMessages = response.map(convertApiMessage);
       setMessages(prev => [...prev, ...apiMessages]);
       
+      // Check if any of the messages are placeholder messages
+      apiMessages.forEach(msg => {
+        if (msg.role === 'assistant' && isPlaceholderMessage(msg.content)) {
+          console.log('Found placeholder message, starting polling:', msg.id);
+          // Start polling for updates to this message
+          pollForMessageUpdates(chatId, msg.id);
+        }
+      });
+      
       // Store the assistant response for displaying in research interface
       const assistantMsg = apiMessages.find(msg => msg.role === 'assistant');
       if (assistantMsg) {
@@ -788,6 +800,126 @@ const ChatMain: React.FC<ChatMainProps> = ({
     });
   };
 
+  // Add a function to check if a message is a placeholder
+  const isPlaceholderMessage = (content: string): boolean => {
+    return content.includes("I'm researching your query") || 
+           content.includes("This may take a few moments");
+  };
+
+  // Add a function to poll for message updates
+  const pollForMessageUpdates = (chatId: number, messageId: string): void => {
+    console.log(`Starting polling for updates to message: ${messageId}`);
+    
+    // Set up an interval to check for updates
+    const pollingInterval = setInterval(async () => {
+      try {
+        // Check if the component is still mounted
+        if (!isInitialLoadComplete.current) {
+          clearInterval(pollingInterval);
+          return;
+        }
+        
+        // Fetch the latest chat to check for message updates
+        const updatedChat = await chatAPI.getChat(chatId);
+        
+        // Find the message that matches our ID
+        const updatedMessage = updatedChat.messages.find(
+          msg => msg.id.toString() === messageId
+        );
+        
+        if (updatedMessage) {
+          // Check if the content has changed and is no longer a placeholder
+          if (!isPlaceholderMessage(updatedMessage.content)) {
+            console.log("Message has been updated with final content");
+            
+            // Update the messages state with the new content
+            setMessages(prevMessages => 
+              prevMessages.map(msg => 
+                msg.id === messageId 
+                  ? { ...msg, content: updatedMessage.content } 
+                  : msg
+              )
+            );
+            
+            // Update the cached messages
+            setCachedChats(prev => {
+              if (!prev[chatId]) return prev;
+              
+              return {
+                ...prev,
+                [chatId]: prev[chatId].map(msg => 
+                  msg.id === messageId 
+                    ? { ...msg, content: updatedMessage.content } 
+                    : msg
+                )
+              };
+            });
+            
+            // Set the new content as the assistant response for the research UI
+            setAssistantResponse({
+              id: messageId,
+              role: 'assistant',
+              content: updatedMessage.content,
+              createdAt: new Date(updatedMessage.created_at),
+              updatedAt: new Date(updatedMessage.created_at)
+            });
+            
+            // Stop polling
+            clearInterval(pollingInterval);
+            // Remove from active intervals
+            activePollingIntervals.current = activePollingIntervals.current.filter(
+              id => id !== pollingInterval
+            );
+            
+            // Animate the updated message
+            setTimeout(() => {
+              anime({
+                targets: `.message-${messageId}`,
+                translateY: [5, 0],
+                opacity: [0.8, 1],
+                backgroundColor: ['rgba(79, 70, 229, 0.2)', 'rgba(0, 0, 0, 0)'],
+                duration: 800,
+                easing: 'easeOutQuad'
+              });
+            }, 100);
+          }
+        }
+      } catch (error) {
+        console.error("Error polling for message updates:", error);
+        // Stop polling on error after a few retries
+        clearInterval(pollingInterval);
+        // Remove from active intervals
+        activePollingIntervals.current = activePollingIntervals.current.filter(
+          id => id !== pollingInterval
+        );
+      }
+    }, 3000); // Poll every 3 seconds
+    
+    // Store the interval ID
+    activePollingIntervals.current.push(pollingInterval);
+    
+    // Clean up the interval after 15 minutes (900000 ms) to prevent indefinite polling
+    setTimeout(() => {
+      clearInterval(pollingInterval);
+      // Remove from active intervals
+      activePollingIntervals.current = activePollingIntervals.current.filter(
+        id => id !== pollingInterval
+      );
+      console.log("Polling timeout reached, stopping polling.");
+    }, 900000);
+  };
+
+  // Add cleanup for polling when component unmounts
+  useEffect(() => {
+    return () => {
+      // Clear all active polling intervals when component unmounts
+      activePollingIntervals.current.forEach(interval => {
+        clearInterval(interval);
+      });
+      activePollingIntervals.current = [];
+    };
+  }, []);
+
   return (
     <div className="flex flex-col h-full bg-gradient-to-br from-gray-900 to-gray-950" ref={mainRef}>
       {/* Loading Overlay */}
@@ -884,19 +1016,41 @@ const ChatMain: React.FC<ChatMainProps> = ({
           {assistantResponse && (
             <div className="mt-6">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-lg font-semibold text-white">Research Results</h3>
+                <h3 className="text-lg font-semibold text-white">
+                  Research Results
+                  {isPlaceholderMessage(assistantResponse.content) && (
+                    <span className="ml-2 text-xs text-indigo-400 bg-indigo-500/20 px-2 py-1 rounded-full">
+                      Processing...
+                    </span>
+                  )}
+                </h3>
                 <button 
                   onClick={() => downloadMarkdownAsPDF(assistantResponse.content)}
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+                  className={`px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-colors ${
+                    isPlaceholderMessage(assistantResponse.content) 
+                      ? 'bg-gray-600 cursor-not-allowed' 
+                      : 'bg-indigo-600 hover:bg-indigo-700'
+                  }`}
+                  disabled={isPlaceholderMessage(assistantResponse.content)}
                 >
                   <IconDownload size={16} />
                   <span>Download PDF</span>
                 </button>
               </div>
               <div className="p-4 rounded-lg bg-gray-800/30 border border-gray-700/50">
-                <ReactMarkdown>
-                  {assistantResponse.content}
-                </ReactMarkdown>
+                {isPlaceholderMessage(assistantResponse.content) ? (
+                  <div>
+                    <p>{assistantResponse.content}</p>
+                    <div className="flex items-center gap-2 mt-4 p-3 bg-indigo-500/10 rounded-lg border border-indigo-500/20">
+                      <div className="w-6 h-6 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin"></div>
+                      <span className="text-indigo-400">Your research is being processed...</span>
+                    </div>
+                  </div>
+                ) : (
+                  <ReactMarkdown>
+                    {assistantResponse.content}
+                  </ReactMarkdown>
+                )}
               </div>
             </div>
           )}
@@ -933,7 +1087,19 @@ const ChatMain: React.FC<ChatMainProps> = ({
                         : 'bg-gray-800/80 text-gray-200 rounded-tl-none border border-gray-700/30'
                     }`}
                   >
-                    {message.role === 'assistant' ? (
+                    {message.role === 'assistant' && isPlaceholderMessage(message.content) ? (
+                      <div>
+                        <p>{message.content}</p>
+                        <div className="flex items-center mt-2">
+                          <div className="animate-pulse flex space-x-1">
+                            <div className="w-2 h-2 rounded-full bg-indigo-400"></div>
+                            <div className="w-2 h-2 rounded-full bg-indigo-400" style={{ animationDelay: '0.3s' }}></div>
+                            <div className="w-2 h-2 rounded-full bg-indigo-400" style={{ animationDelay: '0.6s' }}></div>
+                          </div>
+                          <span className="ml-2 text-xs text-indigo-400">Processing...</span>
+                        </div>
+                      </div>
+                    ) : message.role === 'assistant' ? (
                       <ReactMarkdown>
                         {message.content}
                       </ReactMarkdown>
@@ -956,11 +1122,16 @@ const ChatMain: React.FC<ChatMainProps> = ({
                     .reverse()
                     .find(msg => msg.role === 'assistant');
                   
-                  if (latestAssistantMessage) {
+                  if (latestAssistantMessage && !isPlaceholderMessage(latestAssistantMessage.content)) {
                     downloadMarkdownAsPDF(latestAssistantMessage.content);
                   }
                 }}
-                className="px-3 py-1.5 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition-colors text-sm flex items-center gap-1.5 border border-gray-700/30"
+                disabled={!messages.some(msg => msg.role === 'assistant' && !isPlaceholderMessage(msg.content))}
+                className={`px-3 py-1.5 rounded-lg text-sm flex items-center gap-1.5 border transition-colors ${
+                  messages.some(msg => msg.role === 'assistant' && !isPlaceholderMessage(msg.content))
+                    ? 'bg-gray-800 text-gray-300 hover:bg-gray-700 border-gray-700/30'
+                    : 'bg-gray-800/50 text-gray-500 border-gray-800/30 cursor-not-allowed'
+                }`}
               >
                 <IconDownload size={14} />
                 <span>Download Response</span>

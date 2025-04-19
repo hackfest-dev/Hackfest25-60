@@ -125,4 +125,9 @@ def get_messages(
     
     return db.query(Message).filter(
         Message.chat_id == chat_id
-    ).order_by(Message.created_at).offset(skip).limit(limit).all() 
+    ).order_by(Message.created_at).offset(skip).limit(limit).all()
+
+
+def get_message_by_id(db: Session, message_id: int) -> Optional[Message]:
+    """Get a specific message by ID."""
+    return db.query(Message).filter(Message.id == message_id).first() 
