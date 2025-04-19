@@ -20,20 +20,28 @@ import {
   IconExternalLink,
   IconMoodHappy,
   IconSend,
-  IconMessage
+  IconMessage,
+  IconDownload
 } from '@tabler/icons-react';
 import SearchBar from './SearchBar';
 import anime from 'animejs';
 import ModelSelector from './ModelSelector';
-import ResearchInterface from './ResearchInterface';
 import WelcomeScreen from './WelcomeScreen';
 import ActionButtonGroup from './ActionButtonGroup';
+import chatAPI, { Message as ApiMessage, ChatWithMessages } from '../../services/chatApi';
+import ReactMarkdown from 'react-markdown';
+import { jsPDF } from 'jspdf';
+import 'jspdf-autotable';
+import ResearchInterface from './ResearchInterface';
+import * as Showdown from 'showdown';
+import html2canvas from 'html2canvas';
 
 interface ChatMainProps {
   username: string;
+  chatId?: number | null;
 }
 
-// Add Message interface definition
+// Convert API Message to local Message interface
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -50,7 +58,7 @@ export type ModelProvider = {
   description?: string;
 };
 
-export type ResearchMode = 'idle' | 'processing' | 'chat';
+export type ResearchMode = 'idle' | 'processing' | 'results' | 'chat';
 
 export type FeatureType = 'queryRefiner' | 'deepResearch' | 'podcastCreation' | 'extendedResearch';
 
@@ -113,7 +121,10 @@ export const modelProviders: ModelProvider[] = [
   }
 ];
 
-const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
+const ChatMain: React.FC<ChatMainProps> = ({ 
+  username,
+  chatId
+}) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState<ModelProvider>(modelProviders[0]);
@@ -137,6 +148,8 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
   const [researchStep, setResearchStep] = useState(0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
+  const [currentChatId, setCurrentChatId] = useState<number | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   
   const mainRef = useRef<HTMLDivElement>(null);
   const welcomeRef = useRef<HTMLDivElement>(null);
@@ -240,6 +253,78 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
     }
   }, [researchMode]);
 
+  // Add these states and refs for caching and optimization
+  const [cachedChats, setCachedChats] = useState<Record<number, Message[]>>({});
+  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const isInitialLoadComplete = useRef(false);
+  const [assistantResponse, setAssistantResponse] = useState<Message | null>(null);
+
+  // Modify the loadChat function to use cached data when available
+  const loadChat = async (chatId: number) => {
+    try {
+      setIsLoading(true);
+      
+      // Check if we already have the chat messages cached
+      if (cachedChats[chatId]) {
+        setCurrentChatId(chatId);
+        setMessages(cachedChats[chatId]);
+        setResearchMode(cachedChats[chatId].length > 0 ? 'chat' : 'idle');
+        setIsLoading(false);
+        return;
+      }
+      
+      const chat = await chatAPI.getChat(chatId);
+      
+      // Convert API messages to local format
+      const formattedMessages = chat.messages.map(convertApiMessage);
+      
+      // Cache the messages
+      setCachedChats(prev => ({
+        ...prev,
+        [chatId]: formattedMessages
+      }));
+      
+      setCurrentChatId(chat.id);
+      setMessages(formattedMessages);
+      
+      // If chat has a title, update UI
+      if (chat.title) {
+        // Update title in UI if needed
+      }
+      
+      // Set the research mode to 'chat' if there are messages
+      if (formattedMessages.length > 0) {
+        setResearchMode('chat');
+      } else {
+        setResearchMode('idle');
+      }
+    } catch (error) {
+      console.error('Failed to load chat:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Add a useEffect to keep the chatId in sync
+  useEffect(() => {
+    if (chatId && chatId !== currentChatId) {
+      console.log('chatId prop changed, loading new chat:', chatId);
+      setCurrentChatId(chatId);
+      loadChat(chatId);
+    }
+  }, [chatId]);
+
+  // Watch for changes in currentChatId (when we create a new chat internally)
+  useEffect(() => {
+    if (currentChatId && (!chatId || currentChatId !== chatId)) {
+      console.log('currentChatId changed internally:', currentChatId);
+      // If this is not the initial load, reload the chat to make sure we have fresh data
+      if (isInitialLoadComplete.current) {
+        loadChat(currentChatId);
+      }
+    }
+  }, [currentChatId]);
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -296,127 +381,260 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
     });
   };
   
-  const createNewChat = () => {
-    // Reset all states
-    setSearchQuery('');
-    setResearchMode('idle');
-    setProgress(0);
-    setActiveFeatures({
-      queryRefiner: false,
-      deepResearch: false,
-      podcastCreation: false,
-      extendedResearch: false
-    });
-    setMessages([]); // Clear messages
-    
-    // Animation for resetting
-    anime({
-      targets: mainRef.current,
-      opacity: [0.5, 1],
-      duration: 500,
-      easing: 'easeOutQuad'
-    });
-  };
-
-  // Add a message to the chat
-  const addMessage = (role: 'user' | 'assistant', content: string) => {
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      role,
-      content,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    setMessages(prev => [...prev, newMessage]);
-    
-    // Scroll to the newest message
-    setTimeout(scrollToBottom, 100);
-    
-    return newMessage;
+  // Create a new chat
+  const createNewChat = async () => {
+    try {
+      // Show loading state
+      setIsLoading(true);
+      
+      // Create a new chat in the backend
+      const newChat = await chatAPI.createChat({ title: "New Chat" });
+      
+      // Clear existing messages and reset states
+      setMessages([]);
+      setInputValue('');
+      setResearchMode('idle');
+      setResearchActive(false);
+      setSourceCount(0);
+      setProgress(0);
+      setCurrentStage('');
+      setAssistantResponse(null);
+      
+      // Update cached chats
+      setCachedChats(prev => ({
+        ...prev,
+        [newChat.id]: []
+      }));
+      
+      // Set the new chat ID
+      setCurrentChatId(newChat.id);
+      
+      // Reset features
+      setActiveFeatures({
+        queryRefiner: false,
+        deepResearch: false,
+        podcastCreation: false,
+        extendedResearch: false
+      });
+      
+      // Animate the transition
+      if (mainRef.current) {
+        anime({
+          targets: mainRef.current,
+          opacity: [0.7, 1],
+          translateY: [5, 0],
+          duration: 300,
+          easing: 'easeOutQuad'
+        });
+      }
+      
+      // Animate welcome screen if transitioning to idle mode
+      setTimeout(() => {
+        if (welcomeRef.current && researchMode === 'idle') {
+          anime({
+            targets: welcomeRef.current,
+            opacity: [0, 1],
+            translateY: [20, 0],
+            duration: 500,
+            easing: 'easeOutQuad'
+          });
+        }
+      }, 100);
+      
+      // Force re-render by updating a state
+      setIsFirstLoad(false);
+      
+      console.log('New chat created successfully:', newChat);
+    } catch (error) {
+      console.error('Failed to create new chat:', error);
+      // Show error notification or toast here if you have a notification system
+    } finally {
+      // Hide loading after a slight delay for better UX
+      setTimeout(() => {
+        setIsLoading(false);
+      }, 300);
+    }
   };
   
-  // Handle chat input submission
-  const handleChatSubmit = (e: React.FormEvent) => {
+  // Convert API message to local message format
+  const convertApiMessage = (apiMessage: ApiMessage): Message => {
+    return {
+      id: apiMessage.id.toString(),
+      role: apiMessage.role as 'user' | 'assistant',
+      content: apiMessage.content,
+      createdAt: new Date(apiMessage.created_at),
+      updatedAt: new Date(apiMessage.created_at)
+    };
+  };
+  
+  // Add a message to the current chat
+  const addMessage = async (role: 'user' | 'assistant', content: string) => {
+    if (!content.trim()) return null;
+    
+    // Set loading state
+    setIsLoading(true);
+    
+    try {
+      // If no current chat, create one
+      if (!currentChatId) {
+        console.log('No current chat, creating a new one');
+        const newChat = await chatAPI.createChat();
+        console.log('New chat created:', newChat.id);
+        setCurrentChatId(newChat.id);
+        
+        // Now we can proceed with adding the message
+        const result = await addMessageToChat(newChat.id, role, content);
+        setIsLoading(false);
+        return result;
+      } else {
+        // Add to existing chat
+        console.log('Adding message to existing chat:', currentChatId);
+        const result = await addMessageToChat(currentChatId, role, content);
+        setIsLoading(false);
+        return result;
+      }
+    } catch (error) {
+      console.error('Failed in addMessage:', error);
+      setIsLoading(false);
+      return null;
+    }
+  };
+  
+  // Helper function to add a message to a specific chat
+  const addMessageToChat = async (chatId: number, role: 'user' | 'assistant', content: string) => {
+    try {
+      // Create temporary local message for immediate UI feedback
+      const tempMessage: Message = {
+        id: `temp-${Date.now()}`,
+        role,
+        content,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      
+      // Update UI immediately with the user message
+      setMessages(prev => [...prev, tempMessage]);
+      
+      // Update cached messages
+      setCachedChats(prev => {
+        const prevMessages = prev[chatId] || [];
+        return {
+          ...prev,
+          [chatId]: [...prevMessages, tempMessage]
+        };
+      });
+      
+      // Switch to chat mode if not already in chat or results mode
+      if (researchMode !== 'chat' && researchMode !== 'results') {
+        setResearchMode('chat');
+      }
+      
+      // Scroll to bottom
+      scrollToBottom();
+      
+      // Send to API
+      const response = await chatAPI.addMessage(chatId, {
+        role,
+        content
+      });
+      
+      // Remove the temporary message
+      setMessages(prev => prev.filter(msg => msg.id !== tempMessage.id));
+      
+      // Add all returned messages (both user message and AI response)
+      const apiMessages = response.map(convertApiMessage);
+      setMessages(prev => [...prev, ...apiMessages]);
+      
+      // Store the assistant response for displaying in research interface
+      const assistantMsg = apiMessages.find(msg => msg.role === 'assistant');
+      if (assistantMsg) {
+        setAssistantResponse(assistantMsg);
+      }
+      
+      // Update cached messages
+      setCachedChats(prev => {
+        const filteredMessages = (prev[chatId] || []).filter(msg => msg.id !== tempMessage.id);
+        return {
+          ...prev,
+          [chatId]: [...filteredMessages, ...apiMessages]
+        };
+      });
+      
+      // Scroll to bottom again after adding AI response
+      setTimeout(scrollToBottom, 100);
+      
+      // Return the first message (user message) for compatibility
+      return apiMessages[0];
+    } catch (error) {
+      console.error('Failed to add message:', error);
+      // Remove temp message on error
+      setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')));
+      setCachedChats(prev => {
+        const filteredMessages = (prev[chatId] || []).filter(msg => !msg.id.startsWith('temp-'));
+        return {
+          ...prev,
+          [chatId]: filteredMessages
+        };
+      });
+      return null;
+    }
+  };
+  
+  // Handle chat submission
+  const handleChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!inputValue.trim()) return;
     
-    // Add user message
-    addMessage('user', inputValue);
-    
-    // Clear input field
+    // Save the input value and clear the input field
+    const message = inputValue;
     setInputValue('');
     
-    // Simulate AI response
-    setTimeout(() => {
-      const assistantMessage = addMessage('assistant', generateResponse(inputValue));
-      
-      // Animate the new message
-      anime({
-        targets: `.message-${assistantMessage.id}`,
-        opacity: [0, 1],
-        translateY: [10, 0],
-        duration: 500,
-        easing: 'easeOutQuad'
-      });
-    }, 1000);
-  };
-  
-  // Generate a simple response based on the input
-  const generateResponse = (input: string): string => {
-    const lowercaseInput = input.toLowerCase();
+    // Add user message
+    await addMessage('user', message);
     
-    if (lowercaseInput.includes('hello') || lowercaseInput.includes('hi')) {
-      return `Hello! How can I assist you with your research on "${searchQuery}"?`;
-    } else if (lowercaseInput.includes('thank')) {
-      return 'You\'re welcome! Is there anything else you\'d like to know about this topic?';
-    } else if (lowercaseInput.includes('help')) {
-      return 'I\'m here to help with your research. You can ask specific questions about the sources I found, request summaries, or ask for connections between different pieces of information.';
-    } else if (lowercaseInput.includes('?')) {
-      return `Based on my research about "${searchQuery}", I found that the most relevant information suggests: [detailed explanation would appear here based on actual research implementation]`;
-    } else {
-      return `I've analyzed your query about "${searchQuery}" and found several interesting perspectives. Would you like me to elaborate on any particular aspect?`;
-    }
+    // No need to generate response here - the backend now handles this
   };
   
   // Handle research completion
   const handleResearchComplete = () => {
+    // Change to results mode
+    setResearchMode('results');
+    
+    // Add the user's query as a message if not already present
+    if (messages.length === 0) {
+      // Delay slightly for better UX
+      setTimeout(() => {
+        addMessage('user', searchQuery).then(() => {
+          // The backend will automatically add an assistant response
+          // We'll display this in the research interface
+        });
+      }, 500);
+    } else {
+      // Find the most recent assistant message to display
+      const assistantMsg = messages.find(msg => msg.role === 'assistant');
+      if (assistantMsg) {
+        setAssistantResponse(assistantMsg);
+      }
+    }
+  };
+  
+  // Add function to start chat mode
+  const startChatMode = () => {
     setResearchMode('chat');
     
-    // Delay slightly for better UX
+    // Add a transitional message
     setTimeout(() => {
-      // Create a summary of active features
-      const activeFeaturesList: string[] = [];
-      if (activeFeatures.queryRefiner) activeFeaturesList.push('query refinement');
-      if (activeFeatures.deepResearch) activeFeaturesList.push('deep research');
-      if (activeFeatures.podcastCreation) activeFeaturesList.push('podcast creation');
-      if (activeFeatures.extendedResearch) activeFeaturesList.push('extended sources');
-      
-      const featuresUsed = activeFeaturesList.length > 0 
-        ? activeFeaturesList.join(', ') 
-        : 'standard research';
-        
-      // Add completion message to chat
-      const completionMessage = addMessage(
+      const message = addMessage(
         'assistant',
-        `I've completed my research on "${searchQuery}" using ${featuresUsed}. I found ${sourceCount} relevant sources. What specific aspects would you like to know more about?`
+        'What would you like to know more about? You can ask specific questions about the research findings.'
       );
-      
-      // Animate the message
-      anime({
-        targets: `.message-${completionMessage.id}`,
-        opacity: [0, 1],
-        translateY: [10, 0],
-        duration: 500,
-        easing: 'easeOutQuad'
-      });
       
       // Focus the input field
       if (inputRef.current) {
         inputRef.current.focus();
       }
-    }, 800);
+    }, 300);
   };
   
   // Scroll to bottom of chat container
@@ -426,14 +644,170 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
     }
   };
 
+  // Initialize component - check for existing chats
+  useEffect(() => {
+    const initializeChat = async () => {
+      // If we already loaded messages, don't load again
+      if (isInitialLoadComplete.current) {
+        return;
+      }
+      
+      try {
+        setIsLoading(true);
+        
+        // Get list of chats
+        const chats = await chatAPI.getChats();
+        
+        // If there are chats, load the most recent one
+        if (chats.length > 0) {
+          console.log('Loading existing chat:', chats[0].id);
+          await loadChat(chats[0].id);
+          isInitialLoadComplete.current = true;
+        } else {
+          // Otherwise prepare for a new chat
+          console.log('No existing chats, starting in idle mode');
+          setResearchMode('idle');
+          // Optionally create a new chat automatically
+          // await createNewChat();
+        }
+      } catch (error) {
+        console.error('Failed to initialize chat:', error);
+        setResearchMode('idle');
+      } finally {
+        setIsLoading(false);
+        setIsFirstLoad(false);
+      }
+    };
+    
+    // Only run initialization if no chatId is provided from props
+    if (!chatId) {
+      initializeChat();
+    } else if (!isInitialLoadComplete.current) {
+      console.log('Loading chat from props:', chatId);
+      loadChat(chatId);
+      isInitialLoadComplete.current = true;
+    }
+  }, []);
+
+  // Function to download only the markdown response as PDF
+  const downloadMarkdownAsPDF = (markdownContent: string) => {
+    // Create a temporary div to render the HTML
+    const tempDiv = document.createElement('div');
+    tempDiv.style.padding = '20px';
+    tempDiv.style.position = 'absolute';
+    tempDiv.style.top = '-9999px';
+    tempDiv.style.left = '-9999px';
+    tempDiv.style.width = '800px'; // Fixed width for better layout control
+    
+    // Apply some basic styles for the PDF
+    tempDiv.style.fontFamily = 'Arial, Helvetica, sans-serif';
+    tempDiv.style.fontSize = '12px';
+    tempDiv.style.lineHeight = '1.6';
+    tempDiv.style.color = '#333';
+    
+    // Add styling for markdown elements
+    const styleElement = document.createElement('style');
+    styleElement.textContent = `
+      h1 { font-size: 24px; margin-top: 20px; margin-bottom: 10px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+      h2 { font-size: 20px; margin-top: 18px; margin-bottom: 8px; }
+      h3 { font-size: 16px; margin-top: 16px; margin-bottom: 8px; }
+      p { margin-bottom: 10px; }
+      code { background-color: #f5f5f5; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+      pre { background-color: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; margin-bottom: 15px; }
+      blockquote { border-left: 4px solid #ddd; padding-left: 15px; margin-left: 0; color: #666; }
+      ul, ol { margin-bottom: 15px; margin-left: 20px; }
+      li { margin-bottom: 5px; }
+      table { border-collapse: collapse; width: 100%; margin-bottom: 15px; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th { background-color: #f5f5f5; }
+      hr { border: 0; height: 1px; background-color: #ddd; margin: 20px 0; }
+      img { max-width: 100%; height: auto; }
+    `;
+    document.head.appendChild(styleElement);
+    
+    // Convert markdown to HTML
+    const converter = new Showdown.Converter({
+      tables: true, 
+      simplifiedAutoLink: true,
+      strikethrough: true,
+      tasklists: true,
+      smartIndentationFix: true,
+      openLinksInNewWindow: true,
+      emoji: true
+    });
+    
+    // Add a title
+    const htmlContent = `
+      <h1 style="color: #4338ca; margin-bottom: 20px;">Research Results</h1>
+      ${converter.makeHtml(markdownContent)}
+    `;
+    
+    tempDiv.innerHTML = htmlContent;
+    document.body.appendChild(tempDiv);
+    
+    // Use html2canvas to convert the HTML to an image
+    html2canvas(tempDiv, {
+      scale: 2, // Higher scale for better quality
+      useCORS: true,
+      logging: false,
+      allowTaint: true
+    }).then(canvas => {
+      // Clean up
+      document.body.removeChild(tempDiv);
+      document.head.removeChild(styleElement);
+      
+      // Create PDF with proper dimensions
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+      });
+      
+      // Calculate dimensions
+      const imgWidth = 210; // A4 width in mm (portrait)
+      const pageHeight = 297; // A4 height in mm
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      
+      let heightLeft = imgHeight;
+      let position = 0;
+      
+      // Add image to first page
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+      
+      // Add additional pages if needed
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+      
+      // Save the PDF
+      pdf.save('research-response.pdf');
+    });
+  };
+
   return (
     <div className="flex flex-col h-full bg-gradient-to-br from-gray-900 to-gray-950" ref={mainRef}>
+      {/* Loading Overlay */}
+      {isLoading && (
+        <div className="absolute inset-0 bg-gray-900/70 backdrop-blur-sm z-[10000] flex items-center justify-center">
+          <div className="flex flex-col items-center">
+            <div className="w-12 h-12 rounded-full border-4 border-indigo-500 border-t-transparent animate-spin mb-4"></div>
+            <p className="text-white font-medium">Creating new chat...</p>
+          </div>
+        </div>
+      )}
+      
       {/* Header with model selection */}
       <header className="flex flex-col md:flex-row justify-between md:items-center p-4 border-b border-gray-800/40 backdrop-blur-md bg-gray-900/70 z-[9999]">
         <div className="flex items-center">
           <div className="w-2 h-6 bg-gradient-to-b from-indigo-500 to-purple-600 rounded-full mr-3"></div>
           <h1 className="text-xl font-semibold text-white">
-            {researchMode === 'processing' ? 'Research Query' : researchMode === 'chat' ? 'Chat Results' : 'AI Assistant'}
+            {researchMode === 'processing' ? 'Research Query' : 
+             researchMode === 'results' ? 'Research Results' : 
+             researchMode === 'chat' ? 'Chat Results' : 'AI Assistant'}
           </h1>
         </div>
         
@@ -449,7 +823,7 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
         )}
         
         {/* Status indicators for research mode */}
-        {(researchMode === 'processing' || researchMode === 'chat') && (
+        {(researchMode === 'processing' || researchMode === 'results' || researchMode === 'chat') && (
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               {researchMode === 'processing' && (
@@ -458,15 +832,16 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
                   <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" style={{ animationDelay: '0.5s' }}></div>
                 </>
               )}
-              {researchMode === 'chat' && (
+              {(researchMode === 'results' || researchMode === 'chat') && (
                 <div className="w-2 h-2 rounded-full bg-green-500"></div>
               )}
             </div>
             <button 
               onClick={createNewChat}
-              className="px-3 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-sm flex items-center gap-1.5 transition-all duration-200 border border-gray-700/30"
+              disabled={isLoading}
+              className="px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-sm flex items-center gap-1.5 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <IconX size={14} />
+              <IconX size={14} className="text-gray-100" />
               <span>New Chat</span>
             </button>
           </div>
@@ -491,6 +866,41 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
           onNewChat={createNewChat}
           onComplete={handleResearchComplete}
         />
+      )}
+      
+      {/* Research results - Only shown in results mode with response below research interface */}
+      {researchMode === 'results' && (
+        <div className="flex-1 flex flex-col p-4 overflow-hidden">
+          <ResearchInterface
+            searchQuery={searchQuery}
+            sourceCount={sourceCount}
+            progress={100}  
+            currentStage="Research Complete"
+            onNewChat={createNewChat}
+            onComplete={handleResearchComplete}
+          />
+
+          {/* Markdown Response Section */}
+          {assistantResponse && (
+            <div className="mt-6">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-semibold text-white">Research Results</h3>
+                <button 
+                  onClick={() => downloadMarkdownAsPDF(assistantResponse.content)}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+                >
+                  <IconDownload size={16} />
+                  <span>Download PDF</span>
+                </button>
+              </div>
+              <div className="p-4 rounded-lg bg-gray-800/30 border border-gray-700/50">
+                <ReactMarkdown>
+                  {assistantResponse.content}
+                </ReactMarkdown>
+              </div>
+            </div>
+          )}
+        </div>
       )}
       
       {/* Chat interface - Only shown in chat mode */}
@@ -523,35 +933,40 @@ const ChatMain: React.FC<ChatMainProps> = ({ username }) => {
                         : 'bg-gray-800/80 text-gray-200 rounded-tl-none border border-gray-700/30'
                     }`}
                   >
-                    {message.content}
+                    {message.role === 'assistant' ? (
+                      <ReactMarkdown>
+                        {message.content}
+                      </ReactMarkdown>
+                    ) : (
+                      message.content
+                    )}
                   </div>
                 </div>
               ))
             )}
           </div>
           
-          {/* Chat input */}
-          <form onSubmit={handleChatSubmit} className="relative">
-            <input
-              ref={inputRef}
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Ask about your research..."
-              className="w-full py-3 px-4 pr-12 rounded-lg bg-gray-800/50 border border-gray-700/50 focus:border-indigo-500/30 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-white"
-            />
-            <button
-              type="submit"
-              disabled={!inputValue.trim()}
-              className={`absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg transition-all duration-200 ${
-                inputValue.trim()
-                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                  : 'bg-gray-700 text-gray-400 cursor-not-allowed'
-              }`}
-            >
-              <IconSend size={18} />
-            </button>
-          </form>
+          {/* Add download button in chat mode too */}
+          {messages.length > 0 && (
+            <div className="mt-2 mb-4 flex justify-end">
+              <button 
+                onClick={() => {
+                  // Find the latest assistant message
+                  const latestAssistantMessage = [...messages]
+                    .reverse()
+                    .find(msg => msg.role === 'assistant');
+                  
+                  if (latestAssistantMessage) {
+                    downloadMarkdownAsPDF(latestAssistantMessage.content);
+                  }
+                }}
+                className="px-3 py-1.5 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition-colors text-sm flex items-center gap-1.5 border border-gray-700/30"
+              >
+                <IconDownload size={14} />
+                <span>Download Response</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 

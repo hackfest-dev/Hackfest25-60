@@ -1,9 +1,10 @@
 from fastapi import APIRouter
-
-from app.api.v1.endpoints import auth
+from app.core.auth import get_current_active_user
+from app.api.v1.endpoints import auth, chat
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+api_router.include_router(chat.router, prefix="/chats", tags=["Chat"])
 
 # Create a proper router for the /me endpoint
 me_router = APIRouter()

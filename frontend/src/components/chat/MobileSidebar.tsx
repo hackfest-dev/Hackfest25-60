@@ -1,67 +1,60 @@
-import React, { useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React from 'react';
 import { IconX } from '@tabler/icons-react';
 import Sidebar from './Sidebar';
-import anime from 'animejs';
 
 interface MobileSidebarProps {
   isOpen: boolean;
   onClose: () => void;
+  onChatSelect?: (chatId: number) => void;
+  onNewChat?: () => void;
 }
 
-const MobileSidebar: React.FC<MobileSidebarProps> = ({ isOpen, onClose }) => {
-  useEffect(() => {
-    if (isOpen) {
-      // Animate sidebar content when opened
-      anime({
-        targets: '.mobile-sidebar-content',
-        opacity: [0, 1],
-        translateX: [-20, 0],
-        easing: 'easeOutQuad',
-        duration: 400,
-        delay: anime.stagger(50),
-      });
+const MobileSidebar: React.FC<MobileSidebarProps> = ({ 
+  isOpen, 
+  onClose,
+  onChatSelect,
+  onNewChat
+}) => {
+  // Handler for chat selection that also closes the sidebar
+  const handleChatSelect = (chatId: number) => {
+    if (onChatSelect) {
+      onChatSelect(chatId);
     }
-  }, [isOpen]);
+    onClose();
+  };
   
   return (
-    <AnimatePresence>
+    <>
+      {/* Backdrop */}
       {isOpen && (
-        <>
-          {/* Backdrop with blur effect */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="fixed inset-0 bg-gray-950/60 backdrop-blur-sm z-40 md:hidden"
-            onClick={onClose}
-          />
-          
-          {/* Drawer */}
-          <motion.div
-            initial={{ x: '-100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '-100%' }}
-            transition={{ duration: 0.3, ease: 'easeInOut' }}
-            className="fixed inset-y-0 left-0 z-50 w-[280px] md:hidden"
-          >
-            <div className="relative h-full mobile-sidebar-content overflow-hidden shadow-xl">
-              <Sidebar />
-              
-              {/* Close button - floating */}
-              <button
-                onClick={onClose}
-                className="absolute top-4 -right-4 w-8 h-8 flex items-center justify-center rounded-full bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors shadow-lg transform translate-x-1/2"
-                aria-label="Close sidebar"
-              >
-                <IconX size={16} />
-              </button>
-            </div>
-          </motion.div>
-        </>
+        <div 
+          className="fixed inset-0 bg-black/50 z-40 md:hidden"
+          onClick={onClose}
+        />
       )}
-    </AnimatePresence>
+      
+      {/* Sidebar */}
+      <div 
+        className={`fixed top-0 left-0 bottom-0 w-80 bg-gray-900 z-50 transform transition-transform duration-300 ease-in-out md:hidden ${
+          isOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <div className="flex justify-end p-4 border-b border-gray-800">
+          <button 
+            onClick={onClose}
+            className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800/70 transition"
+          >
+            <IconX size={20} />
+          </button>
+        </div>
+        
+        <Sidebar 
+          className="h-[calc(100%-64px)]" 
+          onChatSelect={handleChatSelect}
+          onNewChat={onNewChat}
+        />
+      </div>
+    </>
   );
 };
 

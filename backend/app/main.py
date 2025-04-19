@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Request
+import os
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware import Middleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
@@ -9,22 +10,25 @@ from starlette.responses import Response
 
 from app.api.v1 import api_router
 from app.core.config import settings
-from app.core.database import check_db_connection
+from app.core.database import check_db_connection, SessionLocal, engine
+from app.models import Base
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url=None,
-    redoc_url=None,
+    description="AI Research Assistant Backend API",
+    version="1.0.0"
 )
+
+# Create all tables in the database
+Base.metadata.create_all(bind=engine)
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=["*"],  # Allows all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 # Include API router
@@ -47,15 +51,26 @@ async def redoc_html():
     )
 
 @app.on_event("startup")
-async def startup_db_client():
-    """Check database connection on startup."""
+async def startup():
     check_db_connection()
 
+@app.get("/")
+def root():
+    return JSONResponse(content={"message": "Welcome to the Turbo Wizard Backend API"})
+
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok"}
+def health_check():
+    return JSONResponse(content={"status": "healthy"})
+
+# Custom 404 handler
+@app.exception_handler(404)
+async def custom_404_handler(request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "The requested resource was not found."}
+    )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True) 

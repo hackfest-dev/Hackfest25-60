@@ -10,6 +10,7 @@ const ChatLayout: React.FC = () => {
   const { user } = useAuth();
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
+  const [selectedChatId, setSelectedChatId] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
   useEffect(() => {
@@ -35,6 +36,21 @@ const ChatLayout: React.FC = () => {
       easing: 'easeInOutQuad'
     });
   };
+
+  // Handler for when a new chat is created
+  const handleNewChat = () => {
+    // We can perform additional actions here if needed
+    // The actual creation happens in Sidebar
+  };
+
+  // Handler for when a chat is selected in the sidebar
+  const handleChatSelect = (chatId: number) => {
+    setSelectedChatId(chatId);
+    // On mobile, close the sidebar
+    if (isMobileSidebarOpen) {
+      setIsMobileSidebarOpen(false);
+    }
+  };
   
   return (
     <div 
@@ -45,13 +61,19 @@ const ChatLayout: React.FC = () => {
       <div 
         className={`hidden md:block transition-all duration-300 ease-in-out ${isDesktopSidebarOpen ? 'md:w-80' : 'md:w-0'} flex-shrink-0 overflow-hidden`}
       >
-        <Sidebar className="h-full" />
+        <Sidebar 
+          className="h-full" 
+          onNewChat={handleNewChat}
+          onChatSelect={handleChatSelect}
+        />
       </div>
       
       {/* Mobile Sidebar */}
       <MobileSidebar 
         isOpen={isMobileSidebarOpen} 
         onClose={() => setIsMobileSidebarOpen(false)} 
+        onChatSelect={handleChatSelect}
+        onNewChat={handleNewChat}
       />
       
       {/* Main content */}
@@ -86,7 +108,11 @@ const ChatLayout: React.FC = () => {
           </div>
         </button>
         
-        <ChatMain username={user?.name || 'User'} />
+        <ChatMain 
+          username={user?.name || 'User'} 
+          key={selectedChatId || 'new-chat'}
+          chatId={selectedChatId}
+        />
       </div>
     </div>
   );

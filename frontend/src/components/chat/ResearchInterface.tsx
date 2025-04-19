@@ -173,7 +173,6 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
   sourceCount, 
   progress, 
   currentStage,
-  onNewChat,
   onComplete
 }) => {
   const [sourcesDiscovered, setSourcesDiscovered] = useState({
@@ -184,7 +183,6 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
   });
   
   const containerRef = useRef<HTMLDivElement>(null);
-  const [showNewChatButton, setShowNewChatButton] = useState(false);
   
   // Generate random source counts based on progress
   useEffect(() => {
@@ -198,14 +196,6 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
         });
       }
     }, 2000);
-    
-    // Show new chat button when research is complete
-    if (progress >= 99) {
-      setShowNewChatButton(true);
-      if (onComplete) {
-        setTimeout(onComplete, 1500);
-      }
-    }
     
     return () => clearInterval(interval);
   }, [progress, onComplete]);
@@ -339,20 +329,6 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
     }
   };
 
-  // Handle new chat button click
-  const handleNewChat = () => {
-    if (onNewChat) {
-      anime({
-        targets: containerRef.current,
-        translateY: [0, 20],
-        opacity: [1, 0],
-        duration: 500,
-        easing: 'easeOutQuad',
-        complete: onNewChat
-      });
-    }
-  };
-
   return (
     <div className="flex-1 overflow-y-auto py-6 px-4 md:px-6 flex flex-col relative" ref={containerRef}>
       {/* Query section with enhanced design */}
@@ -455,19 +431,6 @@ const ResearchInterface: React.FC<ResearchInterfaceProps> = ({
           />
         ))}
       </div>
-      
-      {/* New Chat button - appears when research is complete */}
-      {showNewChatButton && (
-        <div className="flex justify-center mt-auto">
-          <button 
-            onClick={handleNewChat}
-            className="px-4 py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-medium flex items-center gap-2 hover:from-indigo-500 hover:to-purple-500 shadow-lg shadow-indigo-600/20 transition-all duration-300 hover:shadow-xl hover:shadow-indigo-600/30 hover:-translate-y-1"
-          >
-            <IconRocket size={16} />
-            <span>Start New Chat</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 };
